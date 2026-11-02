@@ -39,16 +39,33 @@ flags: `-p 1884` for a different broker port, `-c ci` for a separate cluster,
 WebSocket listener moves to `PORT+7182`. `npm run dev:broker`, `dev:worker`, and
 `dev:orchestrator` are the same three commands.
 
-`scripts/dev.sh broker` serves plain MQTT on `PORT` and **plain** WebSocket on
-`PORT+7182` — no TLS. For a local `wss://`, add certs:
+By default the broker serves plain MQTT on `PORT` and **plain** WebSocket on
+`PORT+7182` — no TLS. `--tls DIR` adds the two TLS listeners, and the other commands
+pick the transport with `-t`:
 
 ```bash
 openssl req -x509 -newkey rsa:2048 -nodes -keyout certs/key.pem -out certs/cert.pem \
   -days 2 -subj "/CN=127.0.0.1" -addext "subjectAltName=IP:127.0.0.1"
 
-scripts/dev.sh broker -p 1883 --tls ./certs      # adds wss://127.0.0.1:9066
-scripts/dev.sh worker  --ca ./certs/cert.pem \
-  -u wss://127.0.0.1:9066                        # transport comes from -u
+scripts/dev.sh broker --tls ./certs     # + wss://127.0.0.1:9066, mqtts://127.0.0.1:9067
+scripts/dev.sh worker -t wss            # certs found automatically via the broker's record
+scripts/dev.sh orchestrator -t wss
+```
+
+`-t` maps to the local broker's ports and needs no URL:
+
+| `-t` | URL for `PORT=1883` | For another `-p PORT` |
+|---|---|---|
+| `mqtt` (default) | `mqtt://127.0.0.1:1883` | `mqtt://127.0.0.1:PORT` |
+| `ws` | `ws://127.0.0.1:9001` | `ws://127.0.0.1:PORT+7182` |
+| `wss` | `wss://127.0.0.1:9066` | `wss://127.0.0.1:PORT+7183` |
+| `mqtts` | `mqtts://127.0.0.1:9067` | `mqtts://127.0.0.1:PORT+7184` |
+
+For a remote broker, use `-u URL` instead and add `--ca FILE` when its certificate
+is not publicly trusted:
+
+```bash
+scripts/dev.sh worker -u wss://broker.example.com/mqtt --ca ./broker-ca.pem
 ```
 
 Or do it by hand:

@@ -23,6 +23,7 @@ URL=""
 CA_FILE=""
 INSECURE=0
 TLS_DIR=""
+TRANSPORT=""
 
 usage() {
 	cat <<EOF
@@ -43,8 +44,12 @@ Options:
   -p PORT        broker port (default $PORT)
   -c CLUSTER     pi-mqtt cluster id (default $CLUSTER)
   -i WORKER_ID   worker id for 'worker' (default $WORKER_ID)
-  -u URL         broker url, which selects the transport:
-                 mqtt:// mqtts:// ws:// wss:// (default mqtt://127.0.0.1:PORT)
+  -t TRANSPORT   local broker transport: mqtt | ws | wss | mqtts
+                 ports: mqtt PORT, ws PORT+7182 (9001 when PORT=1883),
+                 wss PORT+7183, mqtts PORT+7184.
+                 wss/mqtts reuse the certs recorded by 'broker --tls DIR'.
+  -u URL         explicit broker url, for a remote broker:
+                 mqtt:// mqtts:// ws:// wss:// (overrides -t)
   --ca FILE      PEM CA bundle for TLS brokers (sets PI_MQTT_CA_FILE)
   --insecure     skip TLS verification (sets PI_MQTT_REJECT_UNAUTHORIZED=0)
   --tls DIR      'broker' only: also serve wss:// using DIR/cert.pem and
@@ -90,6 +95,7 @@ while [ $# -gt 0 ]; do
 	-p) PORT=${2:-}; shift 2 ;;
 	-c) CLUSTER=${2:-}; shift 2 ;;
 	-i) WORKER_ID=${2:-}; shift 2 ;;
+	-t | --transport) TRANSPORT=${2:-}; shift 2 ;;
 	-u | --url) URL=${2:-}; shift 2 ;;
 	--ca) CA_FILE=${2:-}; shift 2 ;;
 	--insecure) INSECURE=1; shift ;;
@@ -116,6 +122,20 @@ case $WORKER_ID in
 '' | *[!A-Za-z0-9_-]*) die "worker id may contain letters, digits, _ and -" ;;
 esac
 
+WS_PORT=$((PORT + 7182))
+WSS_PORT=$((PORT + 7183))
+MQTTS_PORT=$((PORT + 7184))
+TLS_HINT_FILE="$ROOT/.broker-data/dev-$PORT-tls"
+
+case $TRANSPORT in
+'') ;;
+mqtt) URL="mqtt://127.0.0.1:$PORT" ;;
+ws) if [ "$PORT" = 1883 ]; then URL="ws://127.0.0.1:9001"; else URL="ws://127.0.0.1:$WS_PORT"; fi ;;
+wss) URL="wss://127.0.0.1:$WSS_PORT" ;;
+mqtts) URL="mqtts://127.0.0.1:$MQTTS_PORT" ;;
+*) die "unknown transport: $TRANSPORT (use mqtt, ws, wss or mqtts)" ;;
+esac
+
 URL_SET=0
 if [ -z "$URL" ]; then
 	URL="mqtt://127.0.0.1:$PORT"
@@ -126,6 +146,22 @@ else
 	*) die "url must start with mqtt://, mqtts://, ws:// or wss://" ;;
 	esac
 fi
+
+# A TLS transport against the local broker: reuse the certs 'broker --tls' recorded,
+# so `worker -t wss` needs no extra flags.
+case $TRANSPORT in
+wss | mqtts)
+	if [ -z "$CA_FILE" ] && [ "$INSECURE" = 0 ]; then
+		if [ -f "$TLS_HINT_FILE" ]; then
+			CA_FILE="$(cat "$TLS_HINT_FILE")/cert.pem"
+		elif [ "$DRY_RUN" = 1 ]; then
+			log "note: no CA recorded for port $PORT; a real run needs '--ca FILE' or a broker started with '--tls DIR'"
+		else
+			die "transport $TRANSPORT needs a CA: start the broker with '--tls DIR', pass '--ca FILE', or use --insecure"
+		fi
+	fi
+	;;
+esac
 
 # Env passed to the pi sessions: transport comes from the URL, TLS trust from here.
 SESSION_ENV() {
@@ -151,16 +187,23 @@ run() {
 
 case $COMMAND in
 broker)
-	# The committed dev config pins 1883 and 9001. Any other port gets a derived
-	# config with both listeners shifted (and persistence off, so a fresh broker
-	# does not advertise retained presence from earlier runs).
+	# The committed dev config pins mqtt 1883 and ws 9001. Any other port — and any
+	# TLS setup, which needs generated cert paths — gets a derived config with both
+	# listeners shifted, and persistence off so a fresh broker does not advertise
+	# retained presence from earlier runs.
 	if [ "$PORT" = 1883 ]; then
-		CONF="$ROOT/broker/mosquitto.dev.conf"
 		WS_PORT=9001
 	else
 		WS_PORT=$((PORT + 7182))
+	fi
+	WSS_PORT=$((PORT + 7183))
+	MQTTS_PORT=$((PORT + 7184))
+
+	if [ "$PORT" = 1883 ] && [ -z "$TLS_DIR" ]; then
+		CONF="$ROOT/broker/mosquitto.dev.conf"
+	else
 		mkdir -p "$ROOT/.broker-data"
-			CONF="$ROOT/.broker-data/dev-$PORT.conf"
+		CONF="$ROOT/.broker-data/dev-$PORT.conf"
 		sed -e "s/^listener 1883 127.0.0.1$/listener $PORT 127.0.0.1/" \
 			-e "s/^listener 9001 127.0.0.1$/listener $WS_PORT 127.0.0.1/" \
 			-e "s|^persistence true$|persistence false|" \
@@ -168,24 +211,26 @@ broker)
 			"$ROOT/broker/mosquitto.dev.conf" >"$CONF"
 	fi
 
-	WSS_PORT=$((PORT + 7183))
+	rm -f "$TLS_HINT_FILE"
 	if [ -n "$TLS_DIR" ]; then
-		[ -f "$TLS_DIR/cert.pem" ] || die "no cert.pem in $TLS_DIR"
-		[ -f "$TLS_DIR/key.pem" ] || die "no key.pem in $TLS_DIR"
-		# Certificates cannot come from the committed config, so always generate.
-		CONF="$ROOT/.broker-data/dev-$PORT.conf"
-		mkdir -p "$ROOT/.broker-data"
-		sed -e "s/^listener 1883 127.0.0.1$/listener $PORT 127.0.0.1/" \
-			-e "s/^listener 9001 127.0.0.1$/listener $WS_PORT 127.0.0.1/" \
-			-e "s|^persistence true$|persistence false|" \
-			-e "s|^persistence_location .*$||" \
-			"$ROOT/broker/mosquitto.dev.conf" >"$CONF"
+		if [ "$DRY_RUN" = 1 ]; then
+			[ -f "$TLS_DIR/cert.pem" ] || log "note: $TLS_DIR/cert.pem does not exist yet"
+		else
+			[ -f "$TLS_DIR/cert.pem" ] || die "no cert.pem in $TLS_DIR"
+			[ -f "$TLS_DIR/key.pem" ] || die "no key.pem in $TLS_DIR"
+		fi
 		{
 			printf '\nlistener %s 127.0.0.1\n' "$WSS_PORT"
 			printf 'protocol websockets\n'
 			printf 'certfile %s/cert.pem\n' "$TLS_DIR"
 			printf 'keyfile %s/key.pem\n' "$TLS_DIR"
+			printf '\nlistener %s 127.0.0.1\n' "$MQTTS_PORT"
+			printf 'protocol mqtt\n'
+			printf 'certfile %s/cert.pem\n' "$TLS_DIR"
+			printf 'keyfile %s/key.pem\n' "$TLS_DIR"
 		} >>"$CONF"
+		# Recorded so `worker -t wss` finds the CA without repeating the path.
+		printf '%s' "$TLS_DIR" >"$TLS_HINT_FILE"
 	fi
 
 	if is_listening "$PORT"; then
@@ -193,12 +238,18 @@ broker)
 	fi
 
 	if [ "$DRY_RUN" = 1 ]; then
-		log "[broker] mqtt://127.0.0.1:$PORT ws://127.0.0.1:$WS_PORT${TLS_DIR:+ wss://127.0.0.1:$WSS_PORT} config=$CONF"
+		log "[broker] mqtt://127.0.0.1:$PORT ws://127.0.0.1:$WS_PORT config=$CONF"
+		[ -n "$TLS_DIR" ] && log "[broker] wss://127.0.0.1:$WSS_PORT mqtts://127.0.0.1:$MQTTS_PORT"
 		printf 'PI_MQTT_BROKER_CONF=%s sh %s/scripts/broker.sh\n' "$CONF" "$ROOT"
 		exit 0
 	fi
 
-	log "[broker] 127.0.0.1:$PORT (WebSocket $WS_PORT)"
+	log "[broker] mqtt://127.0.0.1:$PORT  ws://127.0.0.1:$WS_PORT"
+	if [ -n "$TLS_DIR" ]; then
+		log "[broker] wss://127.0.0.1:$WSS_PORT  mqtts://127.0.0.1:$MQTTS_PORT (certs $TLS_DIR)"
+		log "[broker] other shells: $(basename "$0") worker -p $PORT -t wss"
+		log "[broker]               $(basename "$0") orchestrator -p $PORT -t wss"
+	fi
 	log "Ctrl-C to stop"
 	cd "$ROOT"
 	PI_MQTT_BROKER_CONF="$CONF" sh ./scripts/broker.sh
