@@ -167,8 +167,11 @@ export function loadConfig(options: LoadOptions): LoadResult {
 				protocolVersion: rawVersion,
 				keepaliveSec: file?.mqtt?.keepaliveSec ?? 30,
 				reconnectMs: file?.mqtt?.reconnectMs ?? 2000,
-				caFile: file?.mqtt?.caFile,
-				rejectUnauthorized: file?.mqtt?.rejectUnauthorized ?? true,
+				// Env overrides exist so a launcher can point at a TLS broker without
+				// writing a config file.
+				caFile: env.PI_MQTT_CA_FILE ?? file?.mqtt?.caFile,
+				rejectUnauthorized:
+					env.PI_MQTT_REJECT_UNAUTHORIZED === "0" ? false : (file?.mqtt?.rejectUnauthorized ?? true),
 			},
 			worker: {
 				workerId,

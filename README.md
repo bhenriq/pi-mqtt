@@ -39,6 +39,18 @@ flags: `-p 1884` for a different broker port, `-c ci` for a separate cluster,
 WebSocket listener moves to `PORT+7182`. `npm run dev:broker`, `dev:worker`, and
 `dev:orchestrator` are the same three commands.
 
+`scripts/dev.sh broker` serves plain MQTT on `PORT` and **plain** WebSocket on
+`PORT+7182` — no TLS. For a local `wss://`, add certs:
+
+```bash
+openssl req -x509 -newkey rsa:2048 -nodes -keyout certs/key.pem -out certs/cert.pem \
+  -days 2 -subj "/CN=127.0.0.1" -addext "subjectAltName=IP:127.0.0.1"
+
+scripts/dev.sh broker -p 1883 --tls ./certs      # adds wss://127.0.0.1:9066
+scripts/dev.sh worker  --ca ./certs/cert.pem \
+  -u wss://127.0.0.1:9066                        # transport comes from -u
+```
+
 Or do it by hand:
 
 ```bash
@@ -98,8 +110,13 @@ land in `~/.pi/agent/pi-mqtt/tasks/<worker>.jsonl`.
 
 ## Configuration
 
-Credentials from the environment only: `PI_MQTT_URL`, `PI_MQTT_USERNAME`,
-`PI_MQTT_PASSWORD`, `PI_MQTT_CLUSTER`, `PI_MQTT_WORKER_ID`, `PI_MQTT_ROLE`.
+Credentials and transport from the environment only: `PI_MQTT_URL`,
+`PI_MQTT_USERNAME`, `PI_MQTT_PASSWORD`, `PI_MQTT_CLUSTER`, `PI_MQTT_WORKER_ID`,
+`PI_MQTT_ROLE`, `PI_MQTT_CA_FILE` (PEM bundle), `PI_MQTT_REJECT_UNAUTHORIZED=0`
+(disables TLS verification — debugging only).
+
+`PI_MQTT_URL` is what selects the transport: `mqtt://`, `mqtts://`, `ws://`, or
+`wss://`. Nothing else chooses it, and there is no separate "use websockets" flag.
 
 Everything else from `pi-mqtt.json` in the working directory, or
 `~/.pi/agent/pi-mqtt.json`, or `--pi-mqtt-config <path>`. See
@@ -117,10 +134,13 @@ topic names.
 | `ws://` | Plain WebSocket, for the local broker's 9001 listener |
 | `wss://` | TLS WebSocket. `wss://host/mqtt`, or `wss://host` (mqtt.js uses `/mqtt`) |
 
+The scheme in `PI_MQTT_URL` (or `mqtt.url`) is the only thing that picks the
+transport; there is no separate "use websockets" switch.
+
 `wss://` matters where raw TCP is blocked or proxied unreliably — a host that
-terminates TLS in front of a normal HTTP port, for instance. Set
-`mqtt.caFile` to a PEM bundle when the broker uses a CA your system store does
-not trust. Any other scheme is rejected at startup with a clear error, and a
+terminates TLS in front of a normal HTTP port, for instance. Point
+`PI_MQTT_CA_FILE` (or `mqtt.caFile`) at a PEM bundle when the broker uses a CA
+your system store does not trust. Any other scheme is rejected at startup with a clear error, and a
 failed handshake closes the client instead of retrying forever.
 
 ## Protocol

@@ -19,6 +19,10 @@ PORT=1883
 CLUSTER=dev
 WORKER_ID=worker-1
 DRY_RUN=0
+URL=""
+CA_FILE=""
+INSECURE=0
+TLS_DIR=""
 
 usage() {
 	cat <<EOF
@@ -39,6 +43,12 @@ Options:
   -p PORT        broker port (default $PORT)
   -c CLUSTER     pi-mqtt cluster id (default $CLUSTER)
   -i WORKER_ID   worker id for 'worker' (default $WORKER_ID)
+  -u URL         broker url, which selects the transport:
+                 mqtt:// mqtts:// ws:// wss:// (default mqtt://127.0.0.1:PORT)
+  --ca FILE      PEM CA bundle for TLS brokers (sets PI_MQTT_CA_FILE)
+  --insecure     skip TLS verification (sets PI_MQTT_REJECT_UNAUTHORIZED=0)
+  --tls DIR      'broker' only: also serve wss:// using DIR/cert.pem and
+                 DIR/key.pem, on PORT+7183
   --dry-run      print the command that would run, then exit
 
 Run them in three shells:
@@ -80,6 +90,10 @@ while [ $# -gt 0 ]; do
 	-p) PORT=${2:-}; shift 2 ;;
 	-c) CLUSTER=${2:-}; shift 2 ;;
 	-i) WORKER_ID=${2:-}; shift 2 ;;
+	-u | --url) URL=${2:-}; shift 2 ;;
+	--ca) CA_FILE=${2:-}; shift 2 ;;
+	--insecure) INSECURE=1; shift ;;
+	--tls) TLS_DIR=${2:-}; shift 2 ;;
 	--dry-run) DRY_RUN=1; shift ;;
 	broker | worker | orchestrator)
 		[ -z "$COMMAND" ] || die "pick one command (got '$COMMAND' and '$1')"
@@ -102,7 +116,26 @@ case $WORKER_ID in
 '' | *[!A-Za-z0-9_-]*) die "worker id may contain letters, digits, _ and -" ;;
 esac
 
-URL="mqtt://127.0.0.1:$PORT"
+URL_SET=0
+if [ -z "$URL" ]; then
+	URL="mqtt://127.0.0.1:$PORT"
+else
+	URL_SET=1
+	case $URL in
+	mqtt://* | mqtts://* | ws://* | wss://*) ;;
+	*) die "url must start with mqtt://, mqtts://, ws:// or wss://" ;;
+	esac
+fi
+
+# Env passed to the pi sessions: transport comes from the URL, TLS trust from here.
+SESSION_ENV() {
+	printf '%s\n' "PI_MQTT_URL=$URL" "PI_MQTT_CLUSTER=$CLUSTER"
+	[ -n "$CA_FILE" ] && printf '%s\n' "PI_MQTT_CA_FILE=$CA_FILE"
+	[ "$INSECURE" = 1 ] && printf '%s\n' "PI_MQTT_REJECT_UNAUTHORIZED=0"
+	return 0
+}
+
+needs_local_broker() { [ "$URL_SET" = 0 ]; }
 
 run() {
 	# run <description> <command...>
@@ -127,7 +160,7 @@ broker)
 	else
 		WS_PORT=$((PORT + 7182))
 		mkdir -p "$ROOT/.broker-data"
-		CONF="$ROOT/.broker-data/dev-$PORT.conf"
+			CONF="$ROOT/.broker-data/dev-$PORT.conf"
 		sed -e "s/^listener 1883 127.0.0.1$/listener $PORT 127.0.0.1/" \
 			-e "s/^listener 9001 127.0.0.1$/listener $WS_PORT 127.0.0.1/" \
 			-e "s|^persistence true$|persistence false|" \
@@ -135,12 +168,32 @@ broker)
 			"$ROOT/broker/mosquitto.dev.conf" >"$CONF"
 	fi
 
+	WSS_PORT=$((PORT + 7183))
+	if [ -n "$TLS_DIR" ]; then
+		[ -f "$TLS_DIR/cert.pem" ] || die "no cert.pem in $TLS_DIR"
+		[ -f "$TLS_DIR/key.pem" ] || die "no key.pem in $TLS_DIR"
+		# Certificates cannot come from the committed config, so always generate.
+		CONF="$ROOT/.broker-data/dev-$PORT.conf"
+		mkdir -p "$ROOT/.broker-data"
+		sed -e "s/^listener 1883 127.0.0.1$/listener $PORT 127.0.0.1/" \
+			-e "s/^listener 9001 127.0.0.1$/listener $WS_PORT 127.0.0.1/" \
+			-e "s|^persistence true$|persistence false|" \
+			-e "s|^persistence_location .*$||" \
+			"$ROOT/broker/mosquitto.dev.conf" >"$CONF"
+		{
+			printf '\nlistener %s 127.0.0.1\n' "$WSS_PORT"
+			printf 'protocol websockets\n'
+			printf 'certfile %s/cert.pem\n' "$TLS_DIR"
+			printf 'keyfile %s/key.pem\n' "$TLS_DIR"
+		} >>"$CONF"
+	fi
+
 	if is_listening "$PORT"; then
 		die "127.0.0.1:$PORT is already in use (another broker?); pick a port with -p"
 	fi
 
 	if [ "$DRY_RUN" = 1 ]; then
-		log "[broker] 127.0.0.1:$PORT (ws $WS_PORT), config $CONF"
+		log "[broker] mqtt://127.0.0.1:$PORT ws://127.0.0.1:$WS_PORT${TLS_DIR:+ wss://127.0.0.1:$WSS_PORT} config=$CONF"
 		printf 'PI_MQTT_BROKER_CONF=%s sh %s/scripts/broker.sh\n' "$CONF" "$ROOT"
 		exit 0
 	fi
@@ -152,18 +205,20 @@ broker)
 	;;
 
 worker)
-	[ "$DRY_RUN" = 1 ] || is_listening "$PORT" ||
+	[ "$DRY_RUN" = 1 ] || ! needs_local_broker || is_listening "$PORT" ||
 		die "nothing listening on 127.0.0.1:$PORT; start '$0 broker -p $PORT' first"
+	# shellcheck disable=SC2046
 	run "$WORKER_ID -> $URL (cluster $CLUSTER)" \
-		env "PI_MQTT_URL=$URL" "PI_MQTT_CLUSTER=$CLUSTER" \
+		env $(SESSION_ENV) \
 		pi --extension "$EXTENSION" --pi-mqtt-role worker --pi-mqtt-id "$WORKER_ID"
 	;;
 
 orchestrator)
-	[ "$DRY_RUN" = 1 ] || is_listening "$PORT" ||
+	[ "$DRY_RUN" = 1 ] || ! needs_local_broker || is_listening "$PORT" ||
 		die "nothing listening on 127.0.0.1:$PORT; start '$0 broker -p $PORT' first"
+	# shellcheck disable=SC2046
 	run "-> $URL (cluster $CLUSTER)" \
-		env "PI_MQTT_URL=$URL" "PI_MQTT_CLUSTER=$CLUSTER" \
+		env $(SESSION_ENV) \
 		pi --extension "$EXTENSION" --pi-mqtt-role orchestrator
 	;;
 esac
