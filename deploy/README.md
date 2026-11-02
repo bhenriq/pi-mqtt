@@ -31,7 +31,7 @@ export PI_MQTT_URL=wss://broker-production-0bfd.up.railway.app
 export PI_MQTT_CLUSTER=dev
 
 # orchestrator
-PI_MQTT_USERNAME=orch PI_MQTT_PASSWORD=... pi --extension ./src/extension.ts --pi-mqtt-role orchestrator
+PI_MQTT_USERNAME=orch PI_MQTT_PASSWORD=... pi --extension ./extensions/mqtt.ts --pi-mqtt-role orchestrator
 
 # worker
 PI_MQTT_USERNAME=worker-1 PI_MQTT_PASSWORD=... \

@@ -4,7 +4,38 @@ Coordinate independent [pi](https://pi.dev) sessions over MQTT: one **orchestrat
 (your live session) pins tasks to named **workers** (other live pi sessions, one run
 at a time).
 
-Design decisions live in [DESIGN.md](./DESIGN.md). This README covers running it.
+Design decisions live in [DESIGN.md](./DESIGN.md). This README covers installing and running it.
+
+## Install
+
+It is a pi package: install once, then no `--extension` flag.
+
+```bash
+pi install git:github.com/bhenriq/pi-mqtt
+
+# or from a clone
+pi install ./
+
+# or try it for one session without installing
+pi -e ./
+```
+
+Then start sessions with a role:
+
+```bash
+pi --pi-mqtt-role worker --pi-mqtt-id worker-1
+pi --pi-mqtt-role orchestrator
+```
+
+The package registers itself as **`mqtt.ts`** in `pi config` (pi shows the file
+name; there is no display-name field). Disable or enable it there, and remove the
+package with `pi remove git:github.com/bhenriq/pi-mqtt`.
+
+Installed but idle: a session with no `--pi-mqtt-role` opens no socket, publishes
+no presence, and registers no tools.
+
+`pi install` fetches the `mqtt` dependency automatically. Upgrade with
+`pi update --extensions`.
 
 ## Status
 
@@ -81,11 +112,11 @@ Two sessions in the same cluster:
 ```bash
 # worker
 PI_MQTT_URL=mqtt://127.0.0.1:1883 \
-  pi --extension ./src/extension.ts --pi-mqtt-role worker --pi-mqtt-id lap-b
+  pi --extension ./extensions/mqtt.ts --pi-mqtt-role worker --pi-mqtt-id lap-b
 
 # orchestrator (another terminal)
 PI_MQTT_URL=mqtt://127.0.0.1:1883 \
-  pi --extension ./src/extension.ts --pi-mqtt-role orchestrator
+  pi --extension ./extensions/mqtt.ts --pi-mqtt-role orchestrator
 
 # then, in the orchestrator session
 /workers
@@ -136,7 +167,7 @@ The MQTT username must equal the worker id. Clients:
 export PI_MQTT_URL=wss://broker-production-0bfd.up.railway.app
 
 PI_MQTT_USERNAME=orch PI_MQTT_PASSWORD=... \
-  pi --extension ./src/extension.ts --pi-mqtt-role orchestrator
+  pi --extension ./extensions/mqtt.ts --pi-mqtt-role orchestrator
 
 PI_MQTT_USERNAME=worker-1 PI_MQTT_PASSWORD=... \
   scripts/dev.sh worker -u "$PI_MQTT_URL" -i worker-1

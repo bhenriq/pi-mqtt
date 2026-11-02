@@ -160,7 +160,7 @@ package.json            # mqtt, zod-free: types only
 pi-package.json         # installable pi package
 src/protocol.ts         # topics, message types, guards
 src/mqtt.ts             # connect, publish, subscribe, TLS, LWT
-src/extension.ts        # entry: role dispatch, session_start/shutdown
+extensions/mqtt.ts        # entry: role dispatch, session_start/shutdown
 src/orchestrator.ts     # tools, outbox, digest/coalescing, state
 src/worker.ts           # task execution, repo prep, abort/timeout, results
 src/presence.ts         # heartbeat, retained state

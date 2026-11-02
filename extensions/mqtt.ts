@@ -11,13 +11,13 @@
 import { hostname } from "node:os";
 import { Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { loadConfig, type AppConfig } from "./config.ts";
-import { readGitInfo } from "./git.ts";
-import { MqttLink, type LogFn } from "./mqtt.ts";
-import { Orchestrator, type TaskRecord } from "./orchestrator.ts";
-import { Presence, buildPresence, probePresence, type PresenceIdentity } from "./presence.ts";
-import { topicsFor, type Topics } from "./protocol.ts";
-import { Worker } from "./worker.ts";
+import { loadConfig, type AppConfig } from "../src/config.ts";
+import { readGitInfo } from "../src/git.ts";
+import { MqttLink, type LogFn } from "../src/mqtt.ts";
+import { Orchestrator, type TaskRecord } from "../src/orchestrator.ts";
+import { Presence, buildPresence, probePresence, type PresenceIdentity } from "../src/presence.ts";
+import { topicsFor, type Topics } from "../src/protocol.ts";
+import { Worker } from "../src/worker.ts";
 
 const FLAG_ROLE = "pi-mqtt-role";
 const FLAG_ID = "pi-mqtt-id";

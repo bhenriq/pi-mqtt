@@ -12,7 +12,7 @@
 set -eu
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-EXTENSION="$ROOT/src/extension.ts"
+EXTENSION="$ROOT/extensions/mqtt.ts"
 
 COMMAND=""
 PORT=1883
