@@ -23,6 +23,7 @@ URL=""
 CA_FILE=""
 INSECURE=0
 TLS_DIR=""
+SELF_SIGNED=0
 TRANSPORT=""
 
 usage() {
@@ -52,8 +53,10 @@ Options:
                  mqtt:// mqtts:// ws:// wss:// (overrides -t)
   --ca FILE      PEM CA bundle for TLS brokers (sets PI_MQTT_CA_FILE)
   --insecure     skip TLS verification (sets PI_MQTT_REJECT_UNAUTHORIZED=0)
-  --tls DIR      'broker' only: also serve wss:// using DIR/cert.pem and
-                 DIR/key.pem, on PORT+7183
+  --tls DIR      'broker' only: also serve wss:// and mqtts:// using
+                 DIR/cert.pem and DIR/key.pem (PORT+7183, PORT+7184)
+  --self-signed  create DIR/cert.pem and DIR/key.pem if they are missing
+                 (dev only; SAN 127.0.0.1 + localhost, valid 2 days)
   --dry-run      print the command that would run, then exit
 
 Run them in three shells:
@@ -100,6 +103,7 @@ while [ $# -gt 0 ]; do
 	--ca) CA_FILE=${2:-}; shift 2 ;;
 	--insecure) INSECURE=1; shift ;;
 	--tls) TLS_DIR=${2:-}; shift 2 ;;
+	--self-signed) SELF_SIGNED=1; shift ;;
 	--dry-run) DRY_RUN=1; shift ;;
 	broker | worker | orchestrator)
 		[ -z "$COMMAND" ] || die "pick one command (got '$COMMAND' and '$1')"
@@ -213,11 +217,32 @@ broker)
 
 	rm -f "$TLS_HINT_FILE"
 	if [ -n "$TLS_DIR" ]; then
-		if [ "$DRY_RUN" = 1 ]; then
-			[ -f "$TLS_DIR/cert.pem" ] || log "note: $TLS_DIR/cert.pem does not exist yet"
-		else
-			[ -f "$TLS_DIR/cert.pem" ] || die "no cert.pem in $TLS_DIR"
-			[ -f "$TLS_DIR/key.pem" ] || die "no key.pem in $TLS_DIR"
+		if [ ! -f "$TLS_DIR/cert.pem" ] || [ ! -f "$TLS_DIR/key.pem" ]; then
+			if [ "$SELF_SIGNED" = 1 ] && [ "$DRY_RUN" = 1 ]; then
+				log "note: would generate self-signed certs in $TLS_DIR"
+			elif [ "$SELF_SIGNED" = 1 ]; then
+				command -v openssl >/dev/null 2>&1 || die "openssl not found; cannot create certs"
+				mkdir -p "$TLS_DIR"
+				openssl req -x509 -newkey rsa:2048 -nodes \
+					-keyout "$TLS_DIR/key.pem" -out "$TLS_DIR/cert.pem" \
+					-days 2 -subj "/CN=127.0.0.1" \
+					-addext "subjectAltName=IP:127.0.0.1,DNS:localhost" >/dev/null 2>&1 ||
+					die "openssl failed to create certs in $TLS_DIR"
+				chmod 600 "$TLS_DIR/key.pem" 2>/dev/null || true
+				chmod 644 "$TLS_DIR/cert.pem" 2>/dev/null || true
+				log "[broker] generated self-signed certs in $TLS_DIR (valid 2 days)"
+			elif [ "$DRY_RUN" = 1 ]; then
+				log "note: $TLS_DIR has no certs; a real run needs --self-signed or your own cert.pem/key.pem"
+			else
+				die "no certs in $TLS_DIR
+
+  Create a self-signed pair for local testing:
+    $(basename "$0") broker --tls $TLS_DIR --self-signed
+
+  Or supply your own:
+    $TLS_DIR/cert.pem  (full chain)
+    $TLS_DIR/key.pem   (private key)"
+			fi
 		fi
 		{
 			printf '\nlistener %s 127.0.0.1\n' "$WSS_PORT"

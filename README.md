@@ -44,13 +44,14 @@ By default the broker serves plain MQTT on `PORT` and **plain** WebSocket on
 pick the transport with `-t`:
 
 ```bash
-openssl req -x509 -newkey rsa:2048 -nodes -keyout certs/key.pem -out certs/cert.pem \
-  -days 2 -subj "/CN=127.0.0.1" -addext "subjectAltName=IP:127.0.0.1"
-
-scripts/dev.sh broker --tls ./certs     # + wss://127.0.0.1:9066, mqtts://127.0.0.1:9067
-scripts/dev.sh worker -t wss            # certs found automatically via the broker's record
+scripts/dev.sh broker --tls ./certs --self-signed   # + wss 9066, mqtts 9067
+scripts/dev.sh worker -t wss                        # CA found automatically
 scripts/dev.sh orchestrator -t wss
 ```
+
+`--self-signed` creates `certs/cert.pem` and `certs/key.pem` when they are missing
+(SAN `127.0.0.1` and `localhost`, valid 2 days). Drop the flag to use your own pair;
+`./certs` is gitignored.
 
 `-t` maps to the local broker's ports and needs no URL:
 
