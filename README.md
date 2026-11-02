@@ -4,11 +4,14 @@ Coordinate independent [pi](https://pi.dev) sessions over MQTT: one **orchestrat
 (your live session) pins tasks to named **workers** (other live pi sessions, one run
 at a time).
 
+**First time here? [SETUP.md](./SETUP.md) walks through install → configure → first task.**
+
 Design decisions live in [DESIGN.md](./DESIGN.md). This README covers installing and running it.
 
 ## Install
 
-It is a pi package: install once, then no `--extension` flag.
+It is a pi package: install once, then no `--extension` flag. Full walkthrough:
+[SETUP.md](./SETUP.md).
 
 ```bash
 pi install git:github.com/bhenriq/pi-mqtt

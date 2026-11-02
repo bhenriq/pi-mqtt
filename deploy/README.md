@@ -40,7 +40,8 @@ PI_MQTT_USERNAME=worker-1 PI_MQTT_PASSWORD=... \
 
 The tidier setup is one file per machine, `~/.pi/agent/pi-mqtt.json`, holding
 `role`, `mqtt.url`, `mqtt.cluster`, `mqtt.username`, `mqtt.password` — then `pi`
-needs no flags at all. See [Configuration](../README.md#configuration).
+needs no flags at all. See [SETUP.md](../SETUP.md) or
+[Configuration](../README.md#configuration).
 Credentials are **not** in this repo.
 
 Verify the access control after any change to `aclfile`:
