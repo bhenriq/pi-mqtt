@@ -177,6 +177,16 @@ SESSION_ENV() {
 
 needs_local_broker() { [ "$URL_SET" = 0 ]; }
 
+# If the package is installed, pi already loads the extension: passing --extension
+# as well would register the tools twice and open two connections per session.
+if pi list 2>/dev/null | grep -q "pi-mqtt"; then
+	EXT_ARGS=""
+	EXT_SOURCE="installed package (pi list shows pi-mqtt)"
+else
+	EXT_ARGS="--extension $EXTENSION"
+	EXT_SOURCE="local file $EXTENSION"
+fi
+
 run() {
 	# run <description> <command...>
 	description=$1
@@ -284,17 +294,19 @@ worker)
 	[ "$DRY_RUN" = 1 ] || ! needs_local_broker || is_listening "$PORT" ||
 		die "nothing listening on 127.0.0.1:$PORT; start '$0 broker -p $PORT' first"
 	# shellcheck disable=SC2046
+	log "extension source: $EXT_SOURCE"
 	run "$WORKER_ID -> $URL (cluster $CLUSTER)" \
 		env $(SESSION_ENV) \
-		pi --extension "$EXTENSION" --pi-mqtt-role worker --pi-mqtt-id "$WORKER_ID"
+		pi $EXT_ARGS --pi-mqtt-role worker --pi-mqtt-id "$WORKER_ID"
 	;;
 
 orchestrator)
 	[ "$DRY_RUN" = 1 ] || ! needs_local_broker || is_listening "$PORT" ||
 		die "nothing listening on 127.0.0.1:$PORT; start '$0 broker -p $PORT' first"
 	# shellcheck disable=SC2046
+	log "extension source: $EXT_SOURCE"
 	run "-> $URL (cluster $CLUSTER)" \
 		env $(SESSION_ENV) \
-		pi --extension "$EXTENSION" --pi-mqtt-role orchestrator
+		pi $EXT_ARGS --pi-mqtt-role orchestrator
 	;;
 esac

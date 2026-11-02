@@ -63,6 +63,9 @@ scripts/dev.sh worker           # shell 2: worker-1
 scripts/dev.sh orchestrator     # shell 3: the orchestrator
 ```
 
+If the package is installed (`pi list` shows pi-mqtt), the helper uses it and does
+not also pass `--extension` — loading both would register every tool twice.
+
 Each call runs one process in the foreground, so Ctrl-C stops just that piece. Extra
 workers are more shells with distinct ids: `scripts/dev.sh worker -i worker-2`. Common
 flags: `-p 1884` for a different broker port, `-c ci` for a separate cluster,
