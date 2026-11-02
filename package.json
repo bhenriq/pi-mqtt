@@ -15,7 +15,8 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "broker": "sh ./scripts/broker.sh",
-    "probe": "node ./scripts/probe.mjs"
+    "probe": "node ./scripts/probe.mjs",
+    "dev": "sh ./scripts/dev.sh"
   },
   "dependencies": {
     "mqtt": "^5.16.1"
