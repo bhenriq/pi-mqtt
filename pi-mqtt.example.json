@@ -1,22 +1,19 @@
 {
+  "role": "worker",
   "mqtt": {
-    "url": "mqtts://your-broker.up.railway.app:8883",
+    "url": "wss://broker-production-0bfd.up.railway.app",
     "cluster": "dev",
+    "username": "worker-1",
+    "password": "REPLACE_WITH_BROKER_PASSWORD",
     "protocolVersion": 5,
     "keepaliveSec": 30,
     "reconnectMs": 2000,
-    "caFile": null,
     "rejectUnauthorized": true
   },
   "worker": {
-    "workerId": "laptop-b",
-    "repos": {
-      "pi-mqtt": "/Users/you/work/pi-mqtt-w-b"
-    },
-    "defaultRepo": "pi-mqtt",
-    "allowModelOverride": false,
     "heartbeatMs": 30000,
-    "taskExpirySec": 900
-  },
-  "logDir": "~/.pi/agent/pi-mqtt"
+    "taskExpirySec": 900,
+    "repos": {},
+    "allowModelOverride": false
+  }
 }

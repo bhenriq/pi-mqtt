@@ -38,8 +38,10 @@ PI_MQTT_USERNAME=worker-1 PI_MQTT_PASSWORD=... \
   scripts/dev.sh worker -u "$PI_MQTT_URL" -i worker-1
 ```
 
-Credentials live in `~/.pi/agent/pi-mqtt.json` via `mqtt.caFile`/env, or just
-exported per shell. They are **not** in this repo.
+The tidier setup is one file per machine, `~/.pi/agent/pi-mqtt.json`, holding
+`role`, `mqtt.url`, `mqtt.cluster`, `mqtt.username`, `mqtt.password` — then `pi`
+needs no flags at all. See [Configuration](../README.md#configuration).
+Credentials are **not** in this repo.
 
 Verify the access control after any change to `aclfile`:
 

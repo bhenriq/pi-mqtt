@@ -64,7 +64,9 @@ function validateBrokerUrl(raw: string): string | undefined {
 }
 
 interface FileShape {
-	mqtt?: Partial<Omit<MqttConfig, "username" | "password">>;
+	/** Role can live in the file, so a fresh install needs no flags. */
+	role?: string;
+	mqtt?: Partial<MqttConfig>;
 	worker?: Partial<WorkerConfig>;
 	logDir?: string;
 }
@@ -109,12 +111,11 @@ export interface LoadOptions {
 	cwd: string;
 }
 
-export function loadConfig(options: LoadOptions): LoadResult {
-	const role = options.role === "orchestrator" || options.role === "worker" ? options.role : undefined;
-	if (!role) {
-		return { ok: false, reason: "no role selected (pass --pi-mqtt-role orchestrator|worker)" };
-	}
+function normalizeRole(value: unknown): Role | undefined {
+	return value === "orchestrator" || value === "worker" ? value : undefined;
+}
 
+export function loadConfig(options: LoadOptions): LoadResult {
 	let file: FileShape | undefined;
 	try {
 		const path = pickConfigPath(options.configPath, options.cwd);
@@ -124,6 +125,14 @@ export function loadConfig(options: LoadOptions): LoadResult {
 	}
 
 	const env = process.env;
+	// Precedence: CLI flag > environment > pi-mqtt.json.
+	const role = normalizeRole(options.role) ?? normalizeRole(env.PI_MQTT_ROLE) ?? normalizeRole(file?.role);
+	if (!role) {
+		return {
+			ok: false,
+			reason: 'no role selected (pass --pi-mqtt-role orchestrator|worker, set PI_MQTT_ROLE, or add "role" to pi-mqtt.json)',
+		};
+	}
 	const url = env.PI_MQTT_URL ?? file?.mqtt?.url;
 	if (!url) {
 		return { ok: false, reason: "no broker url (set PI_MQTT_URL or mqtt.url in pi-mqtt.json)" };
@@ -140,7 +149,16 @@ export function loadConfig(options: LoadOptions): LoadResult {
 		};
 	}
 
-	const workerId = options.workerId ?? env.PI_MQTT_WORKER_ID ?? file?.worker?.workerId ?? defaultWorkerId();
+	// On a worker the MQTT username *is* the worker id: the broker's ACLs key on it.
+	// Falling back to it prevents the classic mismatch where a session announces one
+	// id and authenticates as another, and then silently cannot read its own tasks.
+	const username = env.PI_MQTT_USERNAME ?? file?.mqtt?.username;
+	const workerId =
+		options.workerId ??
+		env.PI_MQTT_WORKER_ID ??
+		file?.worker?.workerId ??
+		(role === "worker" ? username : undefined) ??
+		defaultWorkerId();
 	if (!isValidIdentifier(workerId)) {
 		return {
 			ok: false,
@@ -159,10 +177,10 @@ export function loadConfig(options: LoadOptions): LoadResult {
 			role,
 			mqtt: {
 				url,
-				// Credentials come from the environment only: never from a file that
-				// might be committed, and never from the broker.
-				username: env.PI_MQTT_USERNAME,
-				password: env.PI_MQTT_PASSWORD,
+				// Environment wins; the file is a fallback for a machine you configure
+				// once. Keep such a file out of git (pi-mqtt.json is gitignored here).
+				username,
+				password: env.PI_MQTT_PASSWORD ?? file?.mqtt?.password,
 				cluster,
 				protocolVersion: rawVersion,
 				keepaliveSec: file?.mqtt?.keepaliveSec ?? 30,

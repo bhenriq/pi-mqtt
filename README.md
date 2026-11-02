@@ -177,17 +177,58 @@ Setup, caveats, and how to verify the ACLs: [deploy/README.md](./deploy/README.m
 
 ## Configuration
 
-Credentials and transport from the environment only: `PI_MQTT_URL`,
-`PI_MQTT_USERNAME`, `PI_MQTT_PASSWORD`, `PI_MQTT_CLUSTER`, `PI_MQTT_WORKER_ID`,
-`PI_MQTT_ROLE`, `PI_MQTT_CA_FILE` (PEM bundle), `PI_MQTT_REJECT_UNAUTHORIZED=0`
-(disables TLS verification — debugging only).
+One file per machine, then no flags and no environment:
 
-`PI_MQTT_URL` is what selects the transport: `mqtt://`, `mqtts://`, `ws://`, or
-`wss://`. Nothing else chooses it, and there is no separate "use websockets" flag.
+`~/.pi/agent/pi-mqtt.json` — a worker:
 
-Everything else from `pi-mqtt.json` in the working directory, or
+```json
+{
+  "role": "worker",
+  "mqtt": {
+    "url": "wss://broker-production-0bfd.up.railway.app",
+    "cluster": "dev",
+    "username": "worker-1",
+    "password": "<from the broker's PI_MQTT_USERS>"
+  }
+}
+```
+
+An orchestrator is the same file with `"role": "orchestrator"` and
+`"username": "orch"`.
+
+```bash
+chmod 600 ~/.pi/agent/pi-mqtt.json   # it holds a password
+pi                                   # already a worker-1
+/mqtt                                # broker, cluster, role, online state, recent log
+```
+
+`workerId` defaults to `mqtt.username`, because the broker's ACLs key on the
+username: a session that authenticates as `worker-1` must announce itself as
+`worker-1`, or it cannot read its own tasks. Set `worker.workerId` explicitly only
+if your broker's ACLs do not tie the two together.
+
+Where the file is looked up: `./pi-mqtt.json` in the working directory, then
 `~/.pi/agent/pi-mqtt.json`, or `--pi-mqtt-config <path>`. See
 [`pi-mqtt.example.json`](./pi-mqtt.example.json).
+
+### Precedence and overrides
+
+CLI flag > environment > `pi-mqtt.json`.
+
+| Setting | Flag | Environment |
+|---|---|---|
+| role | `--pi-mqtt-role` | `PI_MQTT_ROLE` |
+| broker url | — | `PI_MQTT_URL` |
+| cluster | — | `PI_MQTT_CLUSTER` |
+| credentials | — | `PI_MQTT_USERNAME`, `PI_MQTT_PASSWORD` |
+| worker id | `--pi-mqtt-id` | `PI_MQTT_WORKER_ID` |
+| config path | `--pi-mqtt-config` | — |
+| CA bundle | — | `PI_MQTT_CA_FILE` |
+| skip TLS verify | — | `PI_MQTT_REJECT_UNAUTHORIZED=0` (debugging only) |
+
+Environment wins over the file, so CI and one-off runs can override without
+editing it. A session with no role anywhere stays inert: no socket, no presence,
+no tools.
 
 Worker ids and cluster ids are `[A-Za-z0-9][A-Za-z0-9_-]{0,63}`; they end up in
 topic names.
@@ -201,14 +242,14 @@ topic names.
 | `ws://` | Plain WebSocket, for the local broker's 9001 listener |
 | `wss://` | TLS WebSocket. `wss://host/mqtt`, or `wss://host` (mqtt.js uses `/mqtt`) |
 
-The scheme in `PI_MQTT_URL` (or `mqtt.url`) is the only thing that picks the
+The scheme in `mqtt.url` (or `PI_MQTT_URL`) is the only thing that picks the
 transport; there is no separate "use websockets" switch.
 
 `wss://` matters where raw TCP is blocked or proxied unreliably — a host that
-terminates TLS in front of a normal HTTP port, for instance. Point
-`PI_MQTT_CA_FILE` (or `mqtt.caFile`) at a PEM bundle when the broker uses a CA
-your system store does not trust. Any other scheme is rejected at startup with a clear error, and a
-failed handshake closes the client instead of retrying forever.
+terminates TLS in front of a normal HTTP port, for instance. Point `mqtt.caFile`
+(or `PI_MQTT_CA_FILE`) at a PEM bundle when the broker uses a CA your system
+store does not trust. Any other scheme is rejected at startup with a clear error,
+and a failed handshake closes the client instead of retrying forever.
 
 ## Protocol
 
