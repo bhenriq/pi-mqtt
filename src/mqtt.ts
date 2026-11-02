@@ -28,6 +28,8 @@ export class MqttLink {
 	private client: MqttClient | undefined;
 	private readonly handlers = new Map<string, Set<MessageHandler>>();
 	private closed = false;
+	/** Suppresses per-retry error spam until the first successful handshake. */
+	private everConnected = false;
 
 	constructor(
 		private readonly config: MqttConfig,
@@ -65,6 +67,7 @@ export class MqttLink {
 		this.client = client;
 
 		client.on("connect", () => {
+			this.everConnected = true;
 			options.log("info", `mqtt connected to ${config.url} as ${options.clientId}`);
 			// clean:true means the broker forgot our subscriptions; re-apply them.
 			for (const filter of this.handlers.keys()) {
@@ -76,9 +79,13 @@ export class MqttLink {
 		});
 		client.on("reconnect", () => options.log("info", "mqtt reconnecting"));
 		client.on("close", () => {
-			if (!this.closed) options.log("warn", "mqtt connection closed");
+			// A failed first handshake is reported by the connect() rejection.
+			if (!this.closed && this.everConnected) options.log("warn", "mqtt connection closed");
 		});
-		client.on("error", (error) => options.log("error", `mqtt error: ${error.message}`));
+		client.on("error", (error) => {
+			// Before the first handshake the connect() rejection reports it once.
+			if (this.everConnected) options.log("error", `mqtt error: ${error.message}`);
+		});
 		client.on("message", (topic, payload) => {
 			const decoded = decodePayload(payload);
 			if (!decoded) {
@@ -91,14 +98,20 @@ export class MqttLink {
 			}
 		});
 
+		// A failed handshake must not leave a reconnect loop running: the caller
+		// gets one rejection and a closed client, and decides whether to retry.
 		return new Promise((resolve, reject) => {
-			const timer = setTimeout(() => reject(new Error(`timeout connecting to ${config.url}`)), 15_000);
+			const timer = setTimeout(() => {
+				client.end(true);
+				reject(new Error(`timeout connecting to ${config.url}`));
+			}, 15_000);
 			client.once("connect", () => {
 				clearTimeout(timer);
 				resolve();
 			});
 			client.once("error", (error) => {
 				clearTimeout(timer);
+				client.end(true);
 				reject(error);
 			});
 		});

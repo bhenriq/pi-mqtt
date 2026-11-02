@@ -87,6 +87,21 @@ Everything else from `pi-mqtt.json` in the working directory, or
 Worker ids and cluster ids are `[A-Za-z0-9][A-Za-z0-9_-]{0,63}`; they end up in
 topic names.
 
+### Transports
+
+| URL | Use |
+|---|---|
+| `mqtt://` | Plain TCP. Local development only |
+| `mqtts://` | TLS on a raw MQTT port (usually 8883) |
+| `ws://` | Plain WebSocket, for the local broker's 9001 listener |
+| `wss://` | TLS WebSocket. `wss://host/mqtt`, or `wss://host` (mqtt.js uses `/mqtt`) |
+
+`wss://` matters where raw TCP is blocked or proxied unreliably — a host that
+terminates TLS in front of a normal HTTP port, for instance. Set
+`mqtt.caFile` to a PEM bundle when the broker uses a CA your system store does
+not trust. Any other scheme is rejected at startup with a clear error, and a
+failed handshake closes the client instead of retrying forever.
+
 ## Protocol
 
 ```

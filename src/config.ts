@@ -44,6 +44,25 @@ export interface AppConfig {
 
 export type LoadResult = { ok: true; config: AppConfig } | { ok: false; reason: string };
 
+const TRANSPORTS = new Set(["mqtt:", "mqtts:", "ws:", "wss:", "tcp:", "ssl:"]);
+
+/** Reject a URL the client cannot use, before it produces a confusing socket error. */
+function validateBrokerUrl(raw: string): string | undefined {
+	let parsed: URL;
+	try {
+		parsed = new URL(raw);
+	} catch {
+		return `invalid broker url ${JSON.stringify(raw)}`;
+	}
+	if (!TRANSPORTS.has(parsed.protocol)) {
+		return `unsupported broker url scheme ${parsed.protocol} in ${JSON.stringify(raw)}: use mqtt://, mqtts://, ws:// or wss://`;
+	}
+	if ((parsed.protocol === "ws:" || parsed.protocol === "wss:") && parsed.pathname === "/") {
+		// mqtt.js then uses /mqtt, which mosquitto serves. Not an error.
+	}
+	return undefined;
+}
+
 interface FileShape {
 	mqtt?: Partial<Omit<MqttConfig, "username" | "password">>;
 	worker?: Partial<WorkerConfig>;
@@ -109,6 +128,9 @@ export function loadConfig(options: LoadOptions): LoadResult {
 	if (!url) {
 		return { ok: false, reason: "no broker url (set PI_MQTT_URL or mqtt.url in pi-mqtt.json)" };
 	}
+
+	const urlError = validateBrokerUrl(url);
+	if (urlError) return { ok: false, reason: urlError };
 
 	const cluster = env.PI_MQTT_CLUSTER ?? file?.mqtt?.cluster ?? "dev";
 	if (!isValidIdentifier(cluster)) {

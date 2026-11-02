@@ -19,6 +19,18 @@ export PI_MQTT_PASSWORD=<secret>
 export PI_MQTT_CLUSTER=dev
 ```
 
+## Two ways to reach it
+
+| Wiring | Broker listener | Client URL |
+|---|---|---|
+| TCP proxy (raw MQTT) | `1883` plain, or `8883` with certs | `mqtts://host:port` |
+| HTTP domain (WebSocket) | `9001` protocol websockets | `wss://host/mqtt` (port 443) |
+
+The WebSocket route is usually the sturdier one: it rides the same HTTP
+infrastructure as web traffic, survives proxy behaviour that breaks long-lived
+raw TCP connections, and needs no TCP proxy. Add the public HTTP domain to the
+service, point it at container port `9001`, and clients connect with `wss://`.
+
 ## TLS: verify this on your plan
 
 Two shapes, and which one you get decides the URL scheme:

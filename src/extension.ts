@@ -203,7 +203,12 @@ async function startRuntime(pi: ExtensionAPI, ctx: ExtensionContext): Promise<vo
 	try {
 		await link.connect();
 	} catch (error) {
-		ctx.ui.notify(`pi-mqtt: cannot reach broker: ${(error as Error).message}`, "error");
+		await link.close();
+		const reason = (error as Error).message;
+		const hint = /certificate|self-signed|CA/i.test(reason)
+			? " — set mqtt.caFile in pi-mqtt.json to the broker's CA bundle"
+			: "";
+		ctx.ui.notify(`pi-mqtt: cannot reach ${config.mqtt.url}: ${reason}${hint}`, "error");
 		return;
 	}
 
