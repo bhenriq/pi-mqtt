@@ -1,0 +1,162 @@
+/**
+ * Configuration resolution.
+ *
+ * Order: CLI flags > environment > config file > defaults.
+ * Credentials come from the environment only, so they never land in a JSON file
+ * that might get committed.
+ */
+
+import { readFileSync } from "node:fs";
+import { homedir, hostname } from "node:os";
+import { isAbsolute, join, resolve } from "node:path";
+import { isValidIdentifier, type Role } from "./protocol.ts";
+
+export interface MqttConfig {
+	url: string;
+	username?: string;
+	password?: string;
+	cluster: string;
+	protocolVersion: 4 | 5;
+	keepaliveSec: number;
+	reconnectMs: number;
+	/** PEM path; when set, the client trusts only this CA. */
+	caFile?: string;
+	rejectUnauthorized: boolean;
+}
+
+export interface WorkerConfig {
+	workerId: string;
+	/** Allowlisted repo name -> local path. Never taken from the broker. */
+	repos: Record<string, string>;
+	defaultRepo?: string;
+	allowModelOverride: boolean;
+	heartbeatMs: number;
+	/** Message expiry on dispatched tasks, in seconds. */
+	taskExpirySec: number;
+}
+
+export interface AppConfig {
+	role: Role;
+	mqtt: MqttConfig;
+	worker: WorkerConfig;
+	logDir: string;
+}
+
+export type LoadResult = { ok: true; config: AppConfig } | { ok: false; reason: string };
+
+interface FileShape {
+	mqtt?: Partial<Omit<MqttConfig, "username" | "password">>;
+	worker?: Partial<WorkerConfig>;
+	logDir?: string;
+}
+
+function readConfigFile(path: string): FileShape | undefined {
+	let raw: string;
+	try {
+		raw = readFileSync(path, "utf8");
+	} catch {
+		return undefined;
+	}
+	try {
+		const parsed: unknown = JSON.parse(raw);
+		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+			throw new Error("config must be a JSON object");
+		}
+		return parsed as FileShape;
+	} catch (error) {
+		throw new Error(`pi-mqtt config at ${path} is invalid: ${(error as Error).message}`);
+	}
+}
+
+function pickConfigPath(explicit: string | undefined, cwd: string): string | undefined {
+	if (explicit) return isAbsolute(explicit) ? explicit : resolve(cwd, explicit);
+	const candidates = [resolve(cwd, "pi-mqtt.json"), join(homedir(), ".pi", "agent", "pi-mqtt.json")];
+	return candidates.find((path) => readConfigFile(path) !== undefined);
+}
+
+function defaultWorkerId(): string {
+	const cleaned = hostname()
+		.toLowerCase()
+		.replace(/[^a-z0-9_-]+/g, "-")
+		.replace(/^-+|-+$/g, "")
+		.slice(0, 48);
+	return cleaned || "worker";
+}
+
+export interface LoadOptions {
+	role?: string;
+	workerId?: string;
+	configPath?: string;
+	cwd: string;
+}
+
+export function loadConfig(options: LoadOptions): LoadResult {
+	const role = options.role === "orchestrator" || options.role === "worker" ? options.role : undefined;
+	if (!role) {
+		return { ok: false, reason: "no role selected (pass --pi-mqtt-role orchestrator|worker)" };
+	}
+
+	let file: FileShape | undefined;
+	try {
+		const path = pickConfigPath(options.configPath, options.cwd);
+		file = path ? readConfigFile(path) : undefined;
+	} catch (error) {
+		return { ok: false, reason: (error as Error).message };
+	}
+
+	const env = process.env;
+	const url = env.PI_MQTT_URL ?? file?.mqtt?.url;
+	if (!url) {
+		return { ok: false, reason: "no broker url (set PI_MQTT_URL or mqtt.url in pi-mqtt.json)" };
+	}
+
+	const cluster = env.PI_MQTT_CLUSTER ?? file?.mqtt?.cluster ?? "dev";
+	if (!isValidIdentifier(cluster)) {
+		return {
+			ok: false,
+			reason: `invalid cluster id ${JSON.stringify(cluster)}: use letters, digits, _ or -, starting with a letter or digit`,
+		};
+	}
+
+	const workerId = options.workerId ?? env.PI_MQTT_WORKER_ID ?? file?.worker?.workerId ?? defaultWorkerId();
+	if (!isValidIdentifier(workerId)) {
+		return {
+			ok: false,
+			reason: `invalid worker id ${JSON.stringify(workerId)}: use letters, digits, _ or -, starting with a letter or digit`,
+		};
+	}
+
+	const rawVersion = file?.mqtt?.protocolVersion ?? 5;
+	if (rawVersion !== 4 && rawVersion !== 5) {
+		return { ok: false, reason: `mqtt.protocolVersion must be 4 or 5, got ${String(rawVersion)}` };
+	}
+
+	return {
+		ok: true,
+		config: {
+			role,
+			mqtt: {
+				url,
+				// Credentials come from the environment only: never from a file that
+				// might be committed, and never from the broker.
+				username: env.PI_MQTT_USERNAME,
+				password: env.PI_MQTT_PASSWORD,
+				cluster,
+				protocolVersion: rawVersion,
+				keepaliveSec: file?.mqtt?.keepaliveSec ?? 30,
+				reconnectMs: file?.mqtt?.reconnectMs ?? 2000,
+				caFile: file?.mqtt?.caFile,
+				rejectUnauthorized: file?.mqtt?.rejectUnauthorized ?? true,
+			},
+			worker: {
+				workerId,
+				repos: file?.worker?.repos ?? {},
+				defaultRepo: file?.worker?.defaultRepo,
+				allowModelOverride: file?.worker?.allowModelOverride ?? false,
+				heartbeatMs: file?.worker?.heartbeatMs ?? 30_000,
+				taskExpirySec: file?.worker?.taskExpirySec ?? 900,
+			},
+			logDir: file?.logDir ?? join(homedir(), ".pi", "agent", "pi-mqtt"),
+		},
+	};
+}

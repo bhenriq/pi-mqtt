@@ -1,0 +1,22 @@
+{
+  "mqtt": {
+    "url": "mqtts://your-broker.up.railway.app:8883",
+    "cluster": "dev",
+    "protocolVersion": 5,
+    "keepaliveSec": 30,
+    "reconnectMs": 2000,
+    "caFile": null,
+    "rejectUnauthorized": true
+  },
+  "worker": {
+    "workerId": "laptop-b",
+    "repos": {
+      "pi-mqtt": "/Users/you/work/pi-mqtt-w-b"
+    },
+    "defaultRepo": "pi-mqtt",
+    "allowModelOverride": false,
+    "heartbeatMs": 30000,
+    "taskExpirySec": 900
+  },
+  "logDir": "~/.pi/agent/pi-mqtt"
+}

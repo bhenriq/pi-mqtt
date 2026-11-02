@@ -1,0 +1,32 @@
+{
+  "name": "pi-mqtt",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Coordinate pi sessions over MQTT: one orchestrator pins tasks to named workers",
+  "keywords": [
+    "pi-package"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/extension.ts"
+    ]
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "broker": "sh ./scripts/broker.sh",
+    "probe": "node ./scripts/probe.mjs"
+  },
+  "dependencies": {
+    "mqtt": "^5.16.1"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0"
+  }
+}

@@ -1,0 +1,543 @@
+/**
+ * pi-mqtt: coordinate pi sessions over MQTT.
+ *
+ * One orchestrator (your live session) pins tasks to named workers. This file is
+ * the only entry point: it resolves the role, owns the connection lifecycle, wires
+ * the role modules together, and delivers results into the transcript.
+ *
+ * Nothing opens a socket at load time.
+ */
+
+import { hostname } from "node:os";
+import { Type } from "@earendil-works/pi-ai";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { loadConfig, type AppConfig } from "./config.ts";
+import { readGitInfo } from "./git.ts";
+import { MqttLink, type LogFn } from "./mqtt.ts";
+import { Orchestrator, type TaskRecord } from "./orchestrator.ts";
+import { Presence, buildPresence, probePresence, type PresenceIdentity } from "./presence.ts";
+import { topicsFor, type Topics } from "./protocol.ts";
+import { Worker } from "./worker.ts";
+
+const FLAG_ROLE = "pi-mqtt-role";
+const FLAG_ID = "pi-mqtt-id";
+const FLAG_CONFIG = "pi-mqtt-config";
+const FLAG_FORCE = "pi-mqtt-force";
+
+const TOOL_LIST_WORKERS = "list_workers";
+const TOOL_DISPATCH = "dispatch_task";
+const TOOL_RESULT = "get_result";
+const TOOL_CANCEL = "cancel_task";
+const TOOL_LIST_TASKS = "list_tasks";
+const ORCHESTRATOR_TOOLS = [TOOL_LIST_WORKERS, TOOL_DISPATCH, TOOL_RESULT, TOOL_CANCEL, TOOL_LIST_TASKS];
+
+/** Explicit so all three dispatch_task returns share one details type. */
+interface DispatchDetails {
+	taskId?: string;
+	state?: string;
+	worker?: string;
+	error?: string;
+}
+
+const LOG_LIMIT = 100;
+const DIGEST_COALESCE_MS = 3_000;
+/** How long dispatch_task blocks waiting for the worker by default. */
+const DEFAULT_WAIT_MS = 120_000;
+
+interface LogLine {
+	at: number;
+	level: "info" | "warn" | "error";
+	message: string;
+}
+
+interface Runtime {
+	config: AppConfig;
+	topics: Topics;
+	link: MqttLink;
+	presence?: Presence;
+	orchestrator?: Orchestrator;
+	worker?: Worker;
+	/** Digests waiting for the coalescing window to close. */
+	pending: TaskRecord[];
+	timer?: NodeJS.Timeout;
+}
+
+let runtime: Runtime | undefined;
+let currentCtx: ExtensionContext | undefined;
+let logs: LogLine[] = [];
+
+function makeLog(ctx: ExtensionContext): LogFn {
+	return (level, message) => {
+		logs.push({ at: Date.now(), level, message });
+		if (logs.length > LOG_LIMIT) logs = logs.slice(-LOG_LIMIT);
+		if (level !== "info") ctx.ui.notify(`pi-mqtt: ${message}`, level === "warn" ? "warning" : "error");
+	};
+}
+
+function describeModel(ctx: ExtensionContext): string | undefined {
+	const model = ctx.model;
+	if (!model) return undefined;
+	return `${String(model.provider)}/${String(model.id)}`;
+}
+
+function clip(value: string, max: number): string {
+	const flat = value.replace(/\s+/g, " ").trim();
+	return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+}
+
+function describeTask(record: TaskRecord): string {
+	const parts = [`task ${record.task.taskId} · ${record.task.to} · ${record.state}`];
+	const result = record.result;
+	if (!record.finishedAt) {
+		const since = record.startedAt ?? record.sentAt ?? record.task.createdAt;
+		parts.push(`still running (${Math.round((Date.now() - since) / 1000)}s); the result will arrive as a transcript entry`);
+		return parts.join("\n");
+	}
+	if (record.error) parts.push(`error: ${record.error}`);
+	if (result?.error) parts.push(`worker error: ${result.error}`);
+	if (result) {
+		parts.push(`duration: ${Math.round(result.durationMs / 1000)}s`);
+		if (result.text) parts.push(`--- final message ---\n${result.text}`);
+		if (result.repo) {
+			parts.push(`repo: ${result.repo.branch ?? "-"} ${result.repo.baseSha?.slice(0, 8) ?? "?"}..${result.repo.headSha?.slice(0, 8) ?? "?"}`);
+			if (result.repo.diffstat) parts.push(result.repo.diffstat);
+			if (result.repo.patchPath) parts.push(`patch: ${result.repo.patchPath}`);
+		}
+		if (result.artifacts.length) parts.push(`artifacts: ${result.artifacts.join(", ")}`);
+		if (result.sessionFile) parts.push(`session: ${result.sessionFile}`);
+	}
+	return parts.join("\n");
+}
+
+function digestText(record: TaskRecord): string {
+	const lines = [`${record.task.to} · ${record.state} · ${clip(record.task.taskId, 40)}`];
+	const result = record.result;
+	if (result) {
+		const seconds = Math.round(result.durationMs / 1000);
+		lines[0] = `${record.task.to} · ${record.state} in ${seconds}s · ${clip(record.task.taskId, 40)}`;
+		if (result.text) lines.push(clip(result.text, 700));
+		if (result.error) lines.push(`error: ${result.error}`);
+		if (result.repo?.diffstat) lines.push(clip(result.repo.diffstat, 300));
+		if (result.repo?.patchPath) lines.push(`patch: ${result.repo.patchPath}`);
+		if (result.sessionFile) lines.push(`session: ${result.sessionFile}`);
+	} else if (record.error) {
+		lines.push(`error: ${record.error}`);
+	}
+	lines.push(`get_result("${record.task.taskId}") for full output`);
+	return lines.join("\n");
+}
+
+function flushDigests(pi: ExtensionAPI): void {
+	const current = runtime;
+	if (!current) return;
+	if (current.timer) clearTimeout(current.timer);
+	current.timer = undefined;
+	const pending = current.pending;
+	current.pending = [];
+	if (pending.length === 0) return;
+
+	const body = pending.map(digestText).join("\n\n---\n\n");
+	pi.sendMessage(
+		{
+			customType: "pi-mqtt-task",
+			content: `pi-mqtt results\n\n${body}`,
+			display: true,
+			details: { tasks: pending.map((record) => ({ taskId: record.task.taskId, worker: record.task.to, state: record.state })) },
+		},
+		{ triggerTurn: false },
+	);
+}
+
+function deliverResult(pi: ExtensionAPI, record: TaskRecord): void {
+	const current = runtime;
+	if (!current) return;
+	if (record.delivered || record.inlineWanted) return;
+	if (record.task.notify === "wake") {
+		pi.sendUserMessage(`pi-mqtt result\n\n${digestText(record)}`, { deliverAs: "followUp" });
+		return;
+	}
+	current.pending.push(record);
+	if (current.timer) return;
+	current.timer = setTimeout(() => flushDigests(pi), DIGEST_COALESCE_MS);
+	current.timer.unref?.();
+}
+
+async function startRuntime(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
+	const role = (pi.getFlag(FLAG_ROLE) as string | undefined) ?? process.env.PI_MQTT_ROLE;
+	const workerId = pi.getFlag(FLAG_ID) as string | undefined;
+	const configPath = pi.getFlag(FLAG_CONFIG) as string | undefined;
+
+	const loaded = loadConfig({
+		role,
+		...(workerId ? { workerId } : {}),
+		...(configPath ? { configPath } : {}),
+		cwd: ctx.cwd,
+	});
+	if (!loaded.ok) {
+		if (role) ctx.ui.notify(`pi-mqtt inactive: ${loaded.reason}`, "warning");
+		return;
+	}
+
+	const config = loaded.config;
+	const topics = topicsFor(config.mqtt.cluster);
+	const log = makeLog(ctx);
+	const git = readGitInfo(ctx.cwd);
+	const model = describeModel(ctx);
+	const identity: PresenceIdentity = {
+		workerId: config.worker.workerId,
+		host: hostname(),
+		cwd: ctx.cwd,
+		...(git.repo ? { repo: git.repo } : {}),
+		...(git.branch ? { branch: git.branch } : {}),
+		...(git.headSha ? { headSha: git.headSha } : {}),
+		...(model ? { model } : {}),
+	};
+
+	const isWorker = config.role === "worker";
+	const link = new MqttLink(config.mqtt, {
+		clientId: `pi-mqtt-${config.role}-${config.worker.workerId}-${Math.random().toString(36).slice(2, 8)}`,
+		...(isWorker ? { will: { topic: topics.presence(config.worker.workerId), payload: buildPresence(identity, "offline") } } : {}),
+		log,
+	});
+
+	try {
+		await link.connect();
+	} catch (error) {
+		ctx.ui.notify(`pi-mqtt: cannot reach broker: ${(error as Error).message}`, "error");
+		return;
+	}
+
+	// One worker id, one live session: two sessions under the same id both consume
+	// tasks and their results race, so take over explicitly or not at all.
+	if (isWorker) {
+		const existing = await probePresence(link, topics, config.worker.workerId, 1200);
+		const fresh = existing && existing.state !== "offline" && Date.now() - existing.updatedAt < config.worker.heartbeatMs * 3;
+		if (fresh && pi.getFlag(FLAG_FORCE) !== true) {
+			await link.close();
+			const age = Math.round((Date.now() - existing.updatedAt) / 1000);
+			ctx.ui.notify(
+				`pi-mqtt: worker id "${config.worker.workerId}" is already live on ${existing.host} (${existing.cwd}, heartbeat ${age}s ago). Use another --pi-mqtt-id, or --pi-mqtt-force to take it over.`,
+				"error",
+			);
+			return;
+		}
+	}
+
+	const current: Runtime = { config, topics, link, pending: [] };
+	if (config.role === "orchestrator") {
+		const orchestrator = new Orchestrator(link, topics, {
+			heartbeatMs: config.worker.heartbeatMs,
+			taskExpirySec: config.worker.taskExpirySec,
+			log,
+			onFinished: (record) => deliverResult(pi, record),
+		});
+		orchestrator.start();
+		current.orchestrator = orchestrator;
+		pi.setActiveTools([...new Set([...pi.getActiveTools(), ...ORCHESTRATOR_TOOLS])]);
+	} else {
+		const presence = new Presence(link, topics, identity, config.worker.heartbeatMs, log);
+		presence.start();
+		current.presence = presence;
+		const worker = new Worker(link, topics, { pi, ctx: () => currentCtx, config, presence, log });
+		worker.start();
+		current.worker = worker;
+	}
+
+	runtime = current;
+	ctx.ui.notify(`pi-mqtt ${config.role} "${config.worker.workerId}" on ${topics.base}`, "info");
+}
+
+async function stopRuntime(): Promise<void> {
+	const current = runtime;
+	runtime = undefined;
+	if (!current) return;
+	if (current.timer) clearTimeout(current.timer);
+	current.orchestrator?.stop();
+	current.worker?.stop();
+	current.presence?.stop();
+	await current.link.close();
+}
+
+export default function (pi: ExtensionAPI) {
+	pi.registerFlag(FLAG_ROLE, { description: "pi-mqtt role: orchestrator | worker", type: "string" });
+	pi.registerFlag(FLAG_ID, { description: "pi-mqtt worker id (defaults to hostname)", type: "string" });
+	pi.registerFlag(FLAG_CONFIG, { description: "path to pi-mqtt.json", type: "string" });
+	pi.registerFlag(FLAG_FORCE, {
+		description: "start even if another live session is already using this worker id",
+		type: "boolean",
+		default: false,
+	});
+
+	// Registered always, activated only for an orchestrator. That keeps installed
+	// packages invisible in unrelated sessions without re-registering on reload.
+	pi.registerTool({
+		name: TOOL_LIST_WORKERS,
+		label: "List workers",
+		description:
+			"List pi-mqtt workers advertised on the broker: state (idle/busy/offline), repo and branch, model, working directory, and heartbeat age.",
+		parameters: Type.Object({}),
+		defaultActive: false,
+		async execute() {
+			const current = runtime;
+			if (!current?.orchestrator) {
+				return { content: [{ type: "text", text: "pi-mqtt is not active as an orchestrator in this session." }], details: undefined };
+			}
+			return {
+				content: [{ type: "text", text: current.orchestrator.workerTable() }],
+				details: {
+					cluster: current.config.mqtt.cluster,
+					workers: current.orchestrator.entries().map((entry) => ({
+						workerId: entry.presence.workerId,
+						state: entry.stale ? "stale" : entry.presence.state,
+						repo: entry.presence.repo,
+						branch: entry.presence.branch,
+						model: entry.presence.model,
+						cwd: entry.presence.cwd,
+						activeTaskId: entry.presence.activeTaskId,
+						ageMs: entry.ageMs,
+					})),
+				},
+			};
+		},
+	});
+
+	pi.registerTool({
+		name: TOOL_DISPATCH,
+		label: "Dispatch task",
+		description:
+			"Send a task to one named pi-mqtt worker and return immediately. The worker runs it in its own session; the result arrives later as a transcript entry. Use this instead of publishing MQTT messages yourself.",
+		promptSnippet: "dispatch_task — hand work to a named pi-mqtt worker",
+		promptGuidelines: [
+			"Hand work to other agents with `dispatch_task`; never publish pi-mqtt protocol messages with bash.",
+			"Check `list_workers` before dispatching: dispatch fails fast if the target is unknown, offline, or busy.",
+			"`dispatch_task` waits for the result by default and returns it, so do not poll with `get_result` or `sleep`; pass `wait: false` only when fanning out.",
+		],
+		parameters: Type.Object({
+			to: Type.String({ description: "Exact worker id from list_workers, e.g. lap-b" }),
+			prompt: Type.String({ description: "The task, in prose. State what 'done' looks like." }),
+			notify: Type.Optional(
+				Type.Union([Type.Literal("silent"), Type.Literal("wake")], {
+					description: "silent (default) drops a digest; wake starts a turn when the result arrives",
+				}),
+			),
+			ifBusy: Type.Optional(
+				Type.Union([Type.Literal("fail"), Type.Literal("wait")], {
+					description: "fail (default) returns an error; wait holds the task in this session's outbox until the worker is idle",
+				}),
+			),
+			wait: Type.Optional(
+				Type.Boolean({
+					description:
+						"Wait for the result and return it in this tool call (default true). Pass false to fan out and let results arrive as transcript entries.",
+				}),
+			),
+			waitTimeoutMs: Type.Optional(
+				Type.Number({ description: `How long to wait for the result before returning. Default ${DEFAULT_WAIT_MS}ms.` }),
+			),
+			timeoutMs: Type.Optional(Type.Number({ description: "Abort the worker's run after this long. Default 10 minutes." })),
+			maxCostUsd: Type.Optional(Type.Number({ description: "Abort the worker's run when its spend exceeds this" })),
+			model: Type.Optional(Type.String({ description: "Requested model; honored only if the worker allows overrides" })),
+			repo: Type.Optional(
+				Type.Object({
+					baseRef: Type.Optional(Type.String({ description: "Branch or ref to start from" })),
+					baseSha: Type.Optional(Type.String({ description: "Exact commit to start from; preferred over baseRef" })),
+					branch: Type.Optional(Type.String({ description: "Branch to create; defaults to worker/<id>" })),
+				}),
+			),
+		}),
+		defaultActive: false,
+		async execute(_toolCallId, params, signal) {
+			const current = runtime;
+			if (!current?.orchestrator) {
+				return {
+					content: [{ type: "text", text: "pi-mqtt is not active as an orchestrator in this session." }],
+					details: undefined as DispatchDetails | undefined,
+					isError: true,
+				};
+			}
+			const outcome = current.orchestrator.dispatch({
+				to: params.to,
+				prompt: params.prompt,
+				...(params.notify ? { notify: params.notify } : {}),
+				...(params.ifBusy ? { ifBusy: params.ifBusy } : {}),
+				...(params.timeoutMs !== undefined ? { timeoutMs: params.timeoutMs } : {}),
+				...(params.maxCostUsd !== undefined ? { maxCostUsd: params.maxCostUsd } : {}),
+				...(params.model ? { model: params.model } : {}),
+				...(params.repo ? { repo: params.repo } : {}),
+			});
+			if (!outcome.ok) {
+				return {
+					content: [{ type: "text", text: `dispatch failed: ${outcome.error}` }],
+					details: { error: outcome.error } as DispatchDetails,
+					isError: true,
+				};
+			}
+			const queuedNote = outcome.state === "queued" ? " (queued: worker is busy; it fires when idle)" : "";
+
+			if (params.wait === false) {
+				return {
+					content: [{ type: "text", text: `dispatched ${outcome.taskId} to ${params.to}${queuedNote}; not waiting` }],
+					details: { taskId: outcome.taskId, state: outcome.state, worker: params.to } as DispatchDetails,
+				};
+			}
+
+			const waitMs = params.waitTimeoutMs ?? DEFAULT_WAIT_MS;
+			// Declare the intent first: the result may land while we are waiting, and
+			// onFinished runs before this continuation resumes.
+			const tracked = current.orchestrator.get(outcome.taskId);
+			if (tracked) tracked.inlineWanted = true;
+
+			const finished = await current.orchestrator.waitFor(outcome.taskId, waitMs, signal);
+			if (!finished) {
+				if (tracked) tracked.inlineWanted = false;
+				// Race: it finished while we were giving up, so deliver it normally.
+				if (tracked?.finishedAt) deliverResult(pi, tracked);
+				// Still running, or the caller's tool call was aborted: either way the
+				// worker keeps going and the digest path delivers the result.
+				return {
+					content: [
+						{
+							type: "text",
+							text: `dispatched ${outcome.taskId} to ${params.to}${queuedNote}; still running after ${Math.round(waitMs / 1000)}s. The result will arrive as a transcript entry.`,
+						},
+					],
+					details: { taskId: outcome.taskId, state: outcome.state, worker: params.to } as DispatchDetails,
+				};
+			}
+
+			finished.delivered = true;
+			return {
+				content: [{ type: "text", text: describeTask(finished) }],
+				details: { taskId: outcome.taskId, state: finished.state, worker: params.to } as DispatchDetails,
+			};
+		},
+	});
+
+	pi.registerTool({
+		name: TOOL_RESULT,
+		label: "Get task result",
+		description: "Fetch the full result of a dispatched pi-mqtt task: final text, status, diffstat, patch path, session file.",
+		parameters: Type.Object({ taskId: Type.String({ description: "Task id returned by dispatch_task" }) }),
+		defaultActive: false,
+		async execute(_toolCallId, params) {
+			const record = runtime?.orchestrator?.get(params.taskId);
+			if (!record) {
+				return { content: [{ type: "text", text: `unknown task ${params.taskId}` }], details: undefined, isError: true };
+			}
+			record.delivered = true;
+			return {
+				content: [{ type: "text", text: describeTask(record) }],
+				details: { status: record.state, result: record.result },
+			};
+		},
+	});
+
+	pi.registerTool({
+		name: TOOL_LIST_TASKS,
+		label: "List tasks",
+		description:
+			"List pi-mqtt tasks dispatched in this session with their state (queued, sent, running, done, timeout, cancelled, lost). Use it before re-dispatching a lost or timed-out task.",
+		parameters: Type.Object({}),
+		defaultActive: false,
+		async execute() {
+			const current = runtime;
+			if (!current?.orchestrator) {
+				return { content: [{ type: "text", text: "pi-mqtt is not active as an orchestrator in this session." }], details: undefined };
+			}
+			return {
+				content: [{ type: "text", text: current.orchestrator.taskTable() }],
+				details: {
+					tasks: current.orchestrator.list().map((record) => ({
+						taskId: record.task.taskId,
+						worker: record.task.to,
+						state: record.state,
+						attempts: record.attempts,
+						error: record.error ?? record.result?.error,
+					})),
+				},
+			};
+		},
+	});
+
+	pi.registerTool({
+		name: TOOL_CANCEL,
+		label: "Cancel task",
+		description: "Cancel a dispatched pi-mqtt task. Cooperative: the worker aborts its current run and reports the partial result.",
+		parameters: Type.Object({ taskId: Type.String({ description: "Task id to cancel" }) }),
+		defaultActive: false,
+		async execute(_toolCallId, params) {
+			const outcome = runtime?.orchestrator?.cancel(params.taskId) ?? { ok: false, error: "pi-mqtt is not active as an orchestrator" };
+			return {
+				content: [{ type: "text", text: outcome.ok ? `cancelled ${params.taskId}` : `cancel failed: ${outcome.error}` }],
+				details: outcome,
+				...(outcome.ok ? {} : { isError: true }),
+			};
+		},
+	});
+
+	pi.registerCommand("workers", {
+		description: "Show pi-mqtt workers and their state",
+		handler: async (_args, ctx) => {
+			if (!runtime?.orchestrator) {
+				ctx.ui.notify("pi-mqtt is not active as an orchestrator in this session.", "warning");
+				return;
+			}
+			ctx.ui.notify(runtime.orchestrator.workerTable(), "info");
+		},
+	});
+
+	pi.registerCommand("tasks", {
+		description: "Show pi-mqtt tasks dispatched in this session",
+		handler: async (_args, ctx) => {
+			if (!runtime?.orchestrator) {
+				ctx.ui.notify("pi-mqtt is not active as an orchestrator in this session.", "warning");
+				return;
+			}
+			ctx.ui.notify(runtime.orchestrator.taskTable(), "info");
+		},
+	});
+
+	pi.registerCommand("mqtt", {
+		description: "Show pi-mqtt connection status and recent log lines",
+		handler: async (_args, ctx) => {
+			const current = runtime;
+			const lines = logs
+				.slice(-15)
+				.map((line) => `${new Date(line.at).toISOString().slice(11, 19)} ${line.level.padEnd(5)} ${line.message}`);
+			const status = current
+				? [
+						`role:    ${current.config.role}`,
+						`worker:  ${current.config.worker.workerId}`,
+						`broker:  ${current.config.mqtt.url} (MQTT ${current.config.mqtt.protocolVersion})`,
+						`cluster: ${current.config.mqtt.cluster}`,
+						`topics:  ${current.topics.base}`,
+						`online:  ${current.link.online}`,
+					].join("\n")
+				: "pi-mqtt is not active in this session.";
+			ctx.ui.notify([status, "", ...lines].join("\n"), "info");
+		},
+	});
+
+	pi.on("session_start", async (_event, ctx) => {
+		currentCtx = ctx;
+		await stopRuntime();
+		try {
+			await startRuntime(pi, ctx);
+		} catch (error) {
+			ctx.ui.notify(`pi-mqtt: ${(error as Error).message}`, "error");
+		}
+	});
+
+	pi.on("session_shutdown", async () => {
+		await stopRuntime();
+		currentCtx = undefined;
+	});
+
+	pi.on("model_select", async (_event, ctx) => {
+		currentCtx = ctx;
+		const model = describeModel(ctx);
+		if (model) runtime?.presence?.update({ model });
+	});
+
+	logs = [];
+}

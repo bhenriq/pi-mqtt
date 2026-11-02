@@ -1,0 +1,5 @@
+node_modules/
+.broker-data/
+pi-mqtt.json
+*.log
+.DS_Store

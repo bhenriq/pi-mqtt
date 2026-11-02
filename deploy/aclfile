@@ -1,0 +1,21 @@
+# Per-role access control.
+#
+# Users are named after the role they serve:
+#   orch          - the orchestrator session
+#   worker-<id>   - one worker laptop
+#
+# The point: a worker can read only its own control topic and write only its own
+# presence, acks, and results. A compromised worker laptop cannot dispatch tasks
+# to other workers, cannot read their traffic, and cannot forge their results.
+
+user orch
+topic write pi/v1/+/workers/+/ctl
+topic read pi/v1/+/workers/+/presence
+topic read pi/v1/+/workers/+/ack
+topic read pi/v1/+/results/+
+
+# Patterns apply to every user, including orch and any worker.
+pattern read pi/v1/+/workers/%u/ctl
+pattern write pi/v1/+/workers/%u/presence
+pattern write pi/v1/+/workers/%u/ack
+pattern write pi/v1/+/results/+
