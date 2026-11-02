@@ -15,7 +15,7 @@ Design decisions live in [DESIGN.md](./DESIGN.md). This README covers running it
 | 3. `dispatch_task` → worker run → result → `get_result` | done, verified |
 | 4. `notify: wake`, digest coalescing, cancel, `/tasks`, `list_tasks` | done, verified — timeout and cost cap implemented, not exercised end to end |
 | 4b. `dispatch_task` waits for the result by default; duplicate-id guard | done, verified |
-| 5. Packaging + Railway deploy | broker assets written; not deployed |
+| 5. Public broker on Railway | deployed: `wss://broker-production-0bfd.up.railway.app`, see [deploy/](./deploy/README.md) |
 
 ## Local development
 
@@ -125,6 +125,24 @@ sessions under one id would both consume tasks.
 Task transcripts are the worker's own sessions, and each result reports `sessionFile`,
 so you can `/resume` a worker run and read exactly what it did. Per-task JSONL logs
 land in `~/.pi/agent/pi-mqtt/tasks/<worker>.jsonl`.
+
+## Public broker
+
+A broker is deployed on Railway with per-role ACLs:
+`wss://broker-production-0bfd.up.railway.app` (MQTT over TLS WebSocket, port 443).
+The MQTT username must equal the worker id. Clients:
+
+```bash
+export PI_MQTT_URL=wss://broker-production-0bfd.up.railway.app
+
+PI_MQTT_USERNAME=orch PI_MQTT_PASSWORD=... \
+  pi --extension ./src/extension.ts --pi-mqtt-role orchestrator
+
+PI_MQTT_USERNAME=worker-1 PI_MQTT_PASSWORD=... \
+  scripts/dev.sh worker -u "$PI_MQTT_URL" -i worker-1
+```
+
+Setup, caveats, and how to verify the ACLs: [deploy/README.md](./deploy/README.md).
 
 ## Configuration
 

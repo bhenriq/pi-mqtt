@@ -1,58 +1,88 @@
 # Deploying the broker (Railway)
 
-The broker is stock mosquitto with per-role ACLs. Only the auth source is dynamic.
+Stock mosquitto with per-role ACLs. Only the auth source is dynamic.
 
-## Railway
+**Deployed:** project `hello-world` (workspace *Tribe Internal Apps*), service
+`broker`, environment `production`.
 
-1. New service → Deploy from repo → root `deploy/`, or `railway up` from `deploy/`.
-2. Variables:
-   - `PI_MQTT_USERS` = `orch:<strong-secret>,worker-laptop-b:<other-secret>,worker-mac-mini:<third-secret>`
-3. Volume mounted at `/mosquitto/data` (keeps retained presence across deploys).
-4. Networking → add a **TCP proxy** to port `1883`. That public `host:port` is
-   `PI_MQTT_URL`.
-5. Point clients at it:
+| Fact | Value |
+|---|---|
+| Public endpoint | `wss://broker-production-0bfd.up.railway.app` (port 443, path `/mqtt`) |
+| Container listeners | `1883` mqtt, `9001` websockets |
+| Volume | `broker-volume` mounted at `/mosquitto/data` |
+| Env | `PI_MQTT_USERS=orch:<pw>,worker-1:<pw>,...` |
+
+Redeploy after changing anything here:
 
 ```bash
-export PI_MQTT_URL=mqtts://<proxy-host>:<proxy-port>
-export PI_MQTT_USERNAME=worker-laptop-b
-export PI_MQTT_PASSWORD=<secret>
-export PI_MQTT_CLUSTER=dev
+cd deploy
+railway up -d -y          # builds the Dockerfile and rolls the service
+railway logs --lines 40   # entrypoint prints "configured user: ..." per user
 ```
+
+## Client wiring
+
+The MQTT **username must equal the worker id**: the ACL file grants access with
+`%u` in the topic path, so `worker-1` may only touch `workers/worker-1/...` and
+results. The orchestrator uses the `orch` user.
+
+```bash
+export PI_MQTT_URL=wss://broker-production-0bfd.up.railway.app
+export PI_MQTT_CLUSTER=dev
+
+# orchestrator
+PI_MQTT_USERNAME=orch PI_MQTT_PASSWORD=... pi --extension ./src/extension.ts --pi-mqtt-role orchestrator
+
+# worker
+PI_MQTT_USERNAME=worker-1 PI_MQTT_PASSWORD=... \
+  scripts/dev.sh worker -u "$PI_MQTT_URL" -i worker-1
+```
+
+Credentials live in `~/.pi/agent/pi-mqtt.json` via `mqtt.caFile`/env, or just
+exported per shell. They are **not** in this repo.
+
+Verify the access control after any change to `aclfile`:
+
+```bash
+PI_MQTT_URL=wss://broker-production-0bfd.up.railway.app \
+PW_ORCH=... PW_WORKER_1=... PW_WORKER_2=... node scripts/acl-check.mjs
+```
+
+That checks both directions: a worker cannot publish to another worker's control
+topic, cannot read another worker's presence, and cannot read results — while the
+orchestrator can. Read checks publish and look for delivery, because mosquitto can
+grant a SUBACK and still filter the messages.
 
 ## Two ways to reach it
 
 | Wiring | Broker listener | Client URL |
 |---|---|---|
-| TCP proxy (raw MQTT) | `1883` plain, or `8883` with certs | `mqtts://host:port` |
 | HTTP domain (WebSocket) | `9001` protocol websockets | `wss://host/mqtt` (port 443) |
+| TCP proxy (raw MQTT) | `1883` plain, or `8883` with certs | `mqtts://host:port` |
 
-The WebSocket route is usually the sturdier one: it rides the same HTTP
-infrastructure as web traffic, survives proxy behaviour that breaks long-lived
-raw TCP connections, and needs no TCP proxy. Add the public HTTP domain to the
-service, point it at container port `9001`, and clients connect with `wss://`.
+The WebSocket route is the sturdier one: it rides the same infrastructure as web
+traffic, survives proxy behaviour that breaks long-lived raw TCP connections, and
+needs no TCP proxy. Add the public HTTP domain to the service, point it at
+container port `9001`, and clients connect with `wss://`.
+
+## Railway specifics that bite
+
+- **No `VOLUME` in the Dockerfile.** Railway rejects it outright
+  (`docker VOLUME at Line 10 is not supported, use Railway Volumes`). Use
+  `railway volume add -m /mosquitto/data` instead; the build fails otherwise.
+- The image runs mosquitto as the `mosquitto` user; the entrypoint chowns config
+  and data before exec, and `mosquitto.conf` sets `user mosquitto`.
+- The entrypoint rewrites `passwd` from `PI_MQTT_USERS` on every boot, so editing
+  the variable and redeploying revokes removed users immediately.
+- It refuses to start when `PI_MQTT_USERS` yields no users, rather than serving an
+  open broker.
 
 ## TLS: verify this on your plan
 
-Two shapes, and which one you get decides the URL scheme:
+- **Proxy/edge terminates TLS** → clients use `wss://` (or `mqtts://`) and
+  mosquitto keeps plain listeners. This is what is deployed today.
+- **Plain pass-through** → enable the `8883`/`9443` listeners with certs mounted at
+  `/mosquitto/certs`.
 
-- **Proxy terminates TLS** → clients use `mqtts://` and mosquitto keeps the plain
-  1883 listener. Simplest; verify with `openssl s_client -connect host:port`.
-- **Proxy is plain TCP passthrough** → enable the `8883` listener in
-  `mosquitto.conf`, mount certs at `/mosquitto/certs`, and use `mqtts://`.
-
-Do not run a publicly reachable plaintext MQTT listener with agent workers behind
-it: a leaked password becomes remote control of sessions that have `bash`.
-
-## Credential algebra
-
-- One user per role per machine. Never share a worker's credentials between laptops.
-- Rotate by editing `PI_MQTT_USERS` and redeploying: the entrypoint rewrites
-  `passwd` from scratch, so removed entries lose access immediately.
-- The orchestrator's user can publish to `workers/+/ctl` and read everything under
-  its cluster. A worker's user can read only its own `ctl` topic and write only
-  its own presence/ack/result. That asymmetry is the whole point of the ACL file.
-
-## Local alternative
-
-`npm run broker` runs `broker/mosquitto.dev.conf`: no auth, `127.0.0.1` only, same
-protocol and topic behaviour. Use it for development; never as the deployed config.
+Do not expose a plaintext listener without auth: a leaked password is remote
+control of sessions that have `bash`.
