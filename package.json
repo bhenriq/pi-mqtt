@@ -16,7 +16,10 @@
     "typecheck": "tsc --noEmit",
     "broker": "sh ./scripts/broker.sh",
     "probe": "node ./scripts/probe.mjs",
-    "dev": "sh ./scripts/dev.sh"
+    "dev": "sh ./scripts/dev.sh",
+    "dev:broker": "sh ./scripts/dev.sh broker",
+    "dev:worker": "sh ./scripts/dev.sh worker",
+    "dev:orchestrator": "sh ./scripts/dev.sh orchestrator"
   },
   "dependencies": {
     "mqtt": "^5.16.1"

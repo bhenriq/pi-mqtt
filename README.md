@@ -21,14 +21,23 @@ Design decisions live in [DESIGN.md](./DESIGN.md). This README covers running it
 
 ```bash
 npm install
-npm run dev             # broker + worker-1 + orchestrator, in tmux
+scripts/dev.sh -h        # what the helper can start
 ```
 
-`npm run dev` (`scripts/dev.sh -h`) starts a local broker, one or more workers, and an
-orchestrator, each in its own tmux window, then switches you to the orchestrator. Useful
-flags: `-n 3` for three workers, `-p 1884` for a different broker port, `-m manual` to
-print the commands instead of running them, and `stop` to tear everything down. On a
-custom port the WebSocket listener moves to `PORT+7182`.
+Start one piece per shell (`scripts/dev.sh -h` has the details):
+
+```bash
+scripts/dev.sh broker           # shell 1: mosquitto on 127.0.0.1:1883
+scripts/dev.sh worker           # shell 2: worker-1
+scripts/dev.sh orchestrator     # shell 3: the orchestrator
+```
+
+Each call runs one process in the foreground, so Ctrl-C stops just that piece. Extra
+workers are more shells with distinct ids: `scripts/dev.sh worker -i worker-2`. Common
+flags: `-p 1884` for a different broker port, `-c ci` for a separate cluster,
+`--dry-run` to see the command without running it. On a non-default port the broker's
+WebSocket listener moves to `PORT+7182`. `npm run dev:broker`, `dev:worker`, and
+`dev:orchestrator` are the same three commands.
 
 Or do it by hand:
 
