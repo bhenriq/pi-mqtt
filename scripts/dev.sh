@@ -297,7 +297,7 @@ worker)
 	log "extension source: $EXT_SOURCE"
 	run "$WORKER_ID -> $URL (cluster $CLUSTER)" \
 		env $(SESSION_ENV) \
-		pi $EXT_ARGS --pi-mqtt-role worker --pi-mqtt-id "$WORKER_ID"
+		pi $EXT_ARGS --pi-mqtt-start --pi-mqtt-role worker --pi-mqtt-id "$WORKER_ID"
 	;;
 
 orchestrator)
@@ -307,6 +307,6 @@ orchestrator)
 	log "extension source: $EXT_SOURCE"
 	run "-> $URL (cluster $CLUSTER)" \
 		env $(SESSION_ENV) \
-		pi $EXT_ARGS --pi-mqtt-role orchestrator
+		pi $EXT_ARGS --pi-mqtt-start --pi-mqtt-role orchestrator
 	;;
 esac

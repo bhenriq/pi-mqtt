@@ -23,6 +23,7 @@ const FLAG_ROLE = "pi-mqtt-role";
 const FLAG_ID = "pi-mqtt-id";
 const FLAG_CONFIG = "pi-mqtt-config";
 const FLAG_FORCE = "pi-mqtt-force";
+const FLAG_START = "pi-mqtt-start";
 
 const TOOL_LIST_WORKERS = "list_workers";
 const TOOL_DISPATCH = "dispatch_task";
@@ -62,6 +63,15 @@ interface Runtime {
 	timer?: NodeJS.Timeout;
 }
 
+/** Configured but possibly disconnected: connecting is an explicit act. */
+interface Session {
+	config: AppConfig;
+	topics: Topics;
+	log: LogFn;
+}
+
+let api: ExtensionAPI | undefined;
+let session: Session | undefined;
 let runtime: Runtime | undefined;
 let currentCtx: ExtensionContext | undefined;
 let logs: LogLine[] = [];
@@ -162,7 +172,14 @@ function deliverResult(pi: ExtensionAPI, record: TaskRecord): void {
 	current.timer.unref?.();
 }
 
-async function startRuntime(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
+function autoStartRequested(pi: ExtensionAPI, config: AppConfig): boolean {
+	if (pi.getFlag(FLAG_START) === true) return true;
+	if (process.env.PI_MQTT_START === "1") return true;
+	return config.connect === "auto";
+}
+
+/** Read the config and remember it. Connecting is a separate, explicit step. */
+async function prepareSession(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
 	const role = (pi.getFlag(FLAG_ROLE) as string | undefined) ?? process.env.PI_MQTT_ROLE;
 	const workerId = pi.getFlag(FLAG_ID) as string | undefined;
 	const configPath = pi.getFlag(FLAG_CONFIG) as string | undefined;
@@ -179,8 +196,27 @@ async function startRuntime(pi: ExtensionAPI, ctx: ExtensionContext): Promise<vo
 	}
 
 	const config = loaded.config;
-	const topics = topicsFor(config.mqtt.cluster);
-	const log = makeLog(ctx);
+	session = { config, topics: topicsFor(config.mqtt.cluster), log: makeLog(ctx) };
+
+	if (autoStartRequested(pi, config)) {
+		await connectRuntime(pi, ctx);
+		return;
+	}
+	ctx.ui.notify(
+		`pi-mqtt configured as ${config.role} "${config.worker.workerId}" — run /mqtt start to connect`,
+		"info",
+	);
+}
+
+async function connectRuntime(pi: ExtensionAPI, ctx: ExtensionContext): Promise<boolean> {
+	const current = session;
+	if (!current) {
+		ctx.ui.notify("pi-mqtt is not configured in this session: no role or broker. See SETUP.md.", "warning");
+		return false;
+	}
+	if (runtime) return true;
+
+	const { config, topics, log } = current;
 	const git = readGitInfo(ctx.cwd);
 	const model = describeModel(ctx);
 	const identity: PresenceIdentity = {
@@ -209,7 +245,7 @@ async function startRuntime(pi: ExtensionAPI, ctx: ExtensionContext): Promise<vo
 			? " — set mqtt.caFile in pi-mqtt.json to the broker's CA bundle"
 			: "";
 		ctx.ui.notify(`pi-mqtt: cannot reach ${config.mqtt.url}: ${reason}${hint}`, "error");
-		return;
+		return false;
 	}
 
 	// One worker id, one live session: two sessions under the same id both consume
@@ -224,11 +260,11 @@ async function startRuntime(pi: ExtensionAPI, ctx: ExtensionContext): Promise<vo
 				`pi-mqtt: worker id "${config.worker.workerId}" is already live on ${existing.host} (${existing.cwd}, heartbeat ${age}s ago). Use another --pi-mqtt-id, or --pi-mqtt-force to take it over.`,
 				"error",
 			);
-			return;
+			return false;
 		}
 	}
 
-	const current: Runtime = { config, topics, link, pending: [] };
+	const connected: Runtime = { config, topics, link, pending: [] };
 	if (config.role === "orchestrator") {
 		const orchestrator = new Orchestrator(link, topics, {
 			heartbeatMs: config.worker.heartbeatMs,
@@ -237,22 +273,23 @@ async function startRuntime(pi: ExtensionAPI, ctx: ExtensionContext): Promise<vo
 			onFinished: (record) => deliverResult(pi, record),
 		});
 		orchestrator.start();
-		current.orchestrator = orchestrator;
+		connected.orchestrator = orchestrator;
 		pi.setActiveTools([...new Set([...pi.getActiveTools(), ...ORCHESTRATOR_TOOLS])]);
 	} else {
 		const presence = new Presence(link, topics, identity, config.worker.heartbeatMs, log);
 		presence.start();
-		current.presence = presence;
+		connected.presence = presence;
 		const worker = new Worker(link, topics, { pi, ctx: () => currentCtx, config, presence, log });
 		worker.start();
-		current.worker = worker;
+		connected.worker = worker;
 	}
 
-	runtime = current;
-	ctx.ui.notify(`pi-mqtt ${config.role} "${config.worker.workerId}" on ${topics.base}`, "info");
+	runtime = connected;
+	ctx.ui.notify(`pi-mqtt ${config.role} "${config.worker.workerId}" connected to ${topics.base}`, "info");
+	return true;
 }
 
-async function stopRuntime(): Promise<void> {
+async function disconnectRuntime(): Promise<void> {
 	const current = runtime;
 	runtime = undefined;
 	if (!current) return;
@@ -261,6 +298,23 @@ async function stopRuntime(): Promise<void> {
 	current.worker?.stop();
 	current.presence?.stop();
 	await current.link.close();
+	if (current.config.role === "orchestrator" && api) {
+		const keep = api.getActiveTools().filter((name) => !ORCHESTRATOR_TOOLS.includes(name));
+		api.setActiveTools(keep);
+	}
+}
+
+/** Session end: disconnect (gracefully) and forget the config. */
+async function endSession(): Promise<void> {
+	await disconnectRuntime();
+	session = undefined;
+}
+
+/** Why a tool or command cannot do its job right now. */
+function inactiveReason(): string {
+	if (!session) return "pi-mqtt is not configured in this session (no role or broker). See SETUP.md.";
+	if (!runtime) return "pi-mqtt is not connected — run /mqtt start (or launch with --pi-mqtt-start).";
+	return inactiveReason();
 }
 
 export default function (pi: ExtensionAPI) {
@@ -269,6 +323,11 @@ export default function (pi: ExtensionAPI) {
 	pi.registerFlag(FLAG_CONFIG, { description: "path to pi-mqtt.json", type: "string" });
 	pi.registerFlag(FLAG_FORCE, {
 		description: "start even if another live session is already using this worker id",
+		type: "boolean",
+		default: false,
+	});
+	pi.registerFlag(FLAG_START, {
+		description: "connect to the broker at session start instead of waiting for /mqtt start",
 		type: "boolean",
 		default: false,
 	});
@@ -285,7 +344,7 @@ export default function (pi: ExtensionAPI) {
 		async execute() {
 			const current = runtime;
 			if (!current?.orchestrator) {
-				return { content: [{ type: "text", text: "pi-mqtt is not active as an orchestrator in this session." }], details: undefined };
+				return { content: [{ type: "text", text: inactiveReason() }], details: undefined };
 			}
 			return {
 				content: [{ type: "text", text: current.orchestrator.workerTable() }],
@@ -355,7 +414,7 @@ export default function (pi: ExtensionAPI) {
 			const current = runtime;
 			if (!current?.orchestrator) {
 				return {
-					content: [{ type: "text", text: "pi-mqtt is not active as an orchestrator in this session." }],
+					content: [{ type: "text", text: inactiveReason() }],
 					details: undefined as DispatchDetails | undefined,
 					isError: true,
 				};
@@ -447,7 +506,7 @@ export default function (pi: ExtensionAPI) {
 		async execute() {
 			const current = runtime;
 			if (!current?.orchestrator) {
-				return { content: [{ type: "text", text: "pi-mqtt is not active as an orchestrator in this session." }], details: undefined };
+				return { content: [{ type: "text", text: inactiveReason() }], details: undefined };
 			}
 			return {
 				content: [{ type: "text", text: current.orchestrator.taskTable() }],
@@ -484,7 +543,7 @@ export default function (pi: ExtensionAPI) {
 		description: "Show pi-mqtt workers and their state",
 		handler: async (_args, ctx) => {
 			if (!runtime?.orchestrator) {
-				ctx.ui.notify("pi-mqtt is not active as an orchestrator in this session.", "warning");
+				ctx.ui.notify(inactiveReason(), "warning");
 				return;
 			}
 			ctx.ui.notify(runtime.orchestrator.workerTable(), "info");
@@ -495,7 +554,7 @@ export default function (pi: ExtensionAPI) {
 		description: "Show pi-mqtt tasks dispatched in this session",
 		handler: async (_args, ctx) => {
 			if (!runtime?.orchestrator) {
-				ctx.ui.notify("pi-mqtt is not active as an orchestrator in this session.", "warning");
+				ctx.ui.notify(inactiveReason(), "warning");
 				return;
 			}
 			ctx.ui.notify(runtime.orchestrator.taskTable(), "info");
@@ -503,38 +562,69 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("mqtt", {
-		description: "Show pi-mqtt connection status and recent log lines",
-		handler: async (_args, ctx) => {
-			const current = runtime;
+		description: "pi-mqtt status, or /mqtt start | /mqtt stop",
+		handler: async (args, ctx) => {
+			const arg = args.trim().toLowerCase();
+
+			if (arg === "start") {
+				await connectRuntime(pi, ctx);
+				return;
+			}
+			if (arg === "stop") {
+				if (!runtime) {
+					ctx.ui.notify("pi-mqtt is not connected.", "info");
+					return;
+				}
+				await disconnectRuntime();
+				ctx.ui.notify("pi-mqtt disconnected.", "info");
+				return;
+			}
+			if (arg === "restart") {
+				await disconnectRuntime();
+				await connectRuntime(pi, ctx);
+				return;
+			}
+			if (arg) {
+				ctx.ui.notify("usage: /mqtt [start|stop|restart]", "warning");
+				return;
+			}
+
 			const lines = logs
-				.slice(-15)
+				.slice(-12)
 				.map((line) => `${new Date(line.at).toISOString().slice(11, 19)} ${line.level.padEnd(5)} ${line.message}`);
-			const status = current
-				? [
-						`role:    ${current.config.role}`,
-						`worker:  ${current.config.worker.workerId}`,
-						`broker:  ${current.config.mqtt.url} (MQTT ${current.config.mqtt.protocolVersion})`,
-						`cluster: ${current.config.mqtt.cluster}`,
-						`topics:  ${current.topics.base}`,
-						`online:  ${current.link.online}`,
-					].join("\n")
-				: "pi-mqtt is not active in this session.";
-			ctx.ui.notify([status, "", ...lines].join("\n"), "info");
+
+			if (!session) {
+				ctx.ui.notify("pi-mqtt is not configured in this session (no role or broker). See SETUP.md.", "info");
+				return;
+			}
+			const { config, topics } = session;
+			const header = [
+				`role:    ${config.role}`,
+				`worker:  ${config.worker.workerId}`,
+				`broker:  ${config.mqtt.url} (MQTT ${config.mqtt.protocolVersion})`,
+				`cluster: ${config.mqtt.cluster}`,
+				`topics:  ${topics.base}`,
+				runtime
+					? `state:   connected (online: ${runtime.link.online})`
+					: `state:   disconnected — /mqtt start to connect`,
+			].join("\n");
+			ctx.ui.notify([header, "", ...lines].join("\n"), "info");
 		},
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
 		currentCtx = ctx;
-		await stopRuntime();
+		api = pi;
+		await endSession();
 		try {
-			await startRuntime(pi, ctx);
+			await prepareSession(pi, ctx);
 		} catch (error) {
 			ctx.ui.notify(`pi-mqtt: ${(error as Error).message}`, "error");
 		}
 	});
 
 	pi.on("session_shutdown", async () => {
-		await stopRuntime();
+		await endSession();
 		currentCtx = undefined;
 	});
 

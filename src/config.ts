@@ -40,6 +40,8 @@ export interface AppConfig {
 	mqtt: MqttConfig;
 	worker: WorkerConfig;
 	logDir: string;
+	/** "manual" connects only when asked; "auto" connects at session start. */
+	connect: "manual" | "auto";
 }
 
 export type LoadResult = { ok: true; config: AppConfig } | { ok: false; reason: string };
@@ -66,6 +68,7 @@ function validateBrokerUrl(raw: string): string | undefined {
 interface FileShape {
 	/** Role can live in the file, so a fresh install needs no flags. */
 	role?: string;
+	connect?: string;
 	mqtt?: Partial<MqttConfig>;
 	worker?: Partial<WorkerConfig>;
 	logDir?: string;
@@ -166,6 +169,11 @@ export function loadConfig(options: LoadOptions): LoadResult {
 		};
 	}
 
+	const rawConnect = env.PI_MQTT_CONNECT ?? file?.connect ?? "manual";
+	if (rawConnect !== "manual" && rawConnect !== "auto") {
+		return { ok: false, reason: `connect must be "manual" or "auto", got ${JSON.stringify(rawConnect)}` };
+	}
+
 	const rawVersion = file?.mqtt?.protocolVersion ?? 5;
 	if (rawVersion !== 4 && rawVersion !== 5) {
 		return { ok: false, reason: `mqtt.protocolVersion must be 4 or 5, got ${String(rawVersion)}` };
@@ -200,6 +208,7 @@ export function loadConfig(options: LoadOptions): LoadResult {
 				taskExpirySec: file?.worker?.taskExpirySec ?? 900,
 			},
 			logDir: file?.logDir ?? join(homedir(), ".pi", "agent", "pi-mqtt"),
+			connect: rawConnect,
 		},
 	};
 }

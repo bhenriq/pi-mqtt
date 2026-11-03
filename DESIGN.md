@@ -128,6 +128,18 @@ refuses to start when another session is live (`--pi-mqtt-force` takes over deli
 are also deduplicated by `taskId` on the orchestrator, because QoS 1 may redeliver and because a
 second publisher must never produce a second terminal state.
 
+## Connecting is explicit
+
+A configured install does not reach the network on its own. `session_start` reads the config and
+stops there; `/mqtt start` connects, `/mqtt stop` disconnects. A worker is the exception in
+practice, not in principle: it must already be listening when a task arrives, so it opts in at
+launch with `--pi-mqtt-start` or `"connect": "auto"`.
+
+The reason is that an implicit connection has effects the user cannot see: a socket, a retained
+presence entry other sessions read, and (for an orchestrator) five tools that look available.
+Tying those to an explicit action keeps "installed" from meaning "reachable", and makes a
+misconfigured session inert rather than quietly connected to the wrong broker.
+
 ## Failure policy
 
 | Situation | Behavior |

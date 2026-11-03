@@ -107,6 +107,7 @@ railway up -d -y     # from deploy/
 | `mqtt.url` | The scheme picks the transport: `wss://` (TLS WebSocket, usual for a hosted broker), `mqtts://` (TLS on a raw port), `mqtt://`/`ws://` (plain, local only) |
 | `mqtt.cluster` | Topic prefix. Everyone who should see each other must share it |
 | `mqtt.username` / `mqtt.password` | Issued by the broker operator. On a worker the username must equal the worker id |
+| `connect` | `"manual"` (default) connects only when you run `/mqtt start`; `"auto"` connects at session start |
 | `worker.workerId` | Optional. Defaults to the username; set it only if your broker does not tie the two together |
 
 ### Where the file is read from
@@ -130,11 +131,18 @@ Start the worker first, then the orchestrator.
 **On the worker machine:**
 
 ```bash
-pi
+pi                  # starts disconnected
+/mqtt start         # connect, publish presence, start taking tasks
 ```
 
-It becomes a worker. In the TUI, `/mqtt` should report `role: worker`, the broker,
-the cluster, and `online: true`. Check from the orchestrator too — `rpi5`-style ids
+Or connect at launch, which is what a machine that must be listening wants:
+
+```bash
+pi --pi-mqtt-start
+# or put "connect": "auto" in pi-mqtt.json
+```
+
+In the TUI, `/mqtt` reports the role, broker, cluster, and `state: connected`. Check from the orchestrator too — `rpi5`-style ids
 appear in the worker list.
 
 Start it from the directory tasks should run in: a worker's working directory is
@@ -144,6 +152,7 @@ wherever `pi` was started.
 
 ```bash
 pi
+/mqtt start
 which workers are available?
 ask worker-1 what time it is
 ```
@@ -174,7 +183,8 @@ worker is idle), `timeoutMs`, `maxCostUsd`, `repo: { baseSha | baseRef, branch }
 
 | Symptom | Cause and fix |
 |---|---|
-| Nothing happens, no tools, no `/workers` | No role. Add `"role"` to the config, or pass `--pi-mqtt-role` |
+| Nothing happens, no tools, no `/workers` | Not connected. Run `/mqtt start` (connecting is explicit; `--pi-mqtt-start` or `"connect": "auto"` connects at launch) |
+| Nothing happens, and `/mqtt` says "not configured" | No role. Add `"role"` to the config, or pass `--pi-mqtt-role` |
 | `pi-mqtt inactive: no broker url` | No `mqtt.url` in the file and no `PI_MQTT_URL` |
 | `pi-mqtt: cannot reach wss://…: self-signed certificate` | Broker uses a private CA: set `mqtt.caFile` to its PEM bundle |
 | `worker id "x" is already live on …` | Two sessions using one id. Stop the old one, use another `-i`/`workerId`, or `--pi-mqtt-force` to take over deliberately |
