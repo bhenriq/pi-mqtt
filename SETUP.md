@@ -142,7 +142,8 @@ pi --pi-mqtt-start
 # or put "connect": "auto" in pi-mqtt.json
 ```
 
-In the TUI, `/mqtt` reports the role, broker, cluster, and `state: connected`. Check from the orchestrator too — `rpi5`-style ids
+In the TUI, `/mqtt status` reports the role, broker, cluster, `state: connected`, and
+how many workers are online. From an orchestrator, `/workers` prints the full table. Check from the orchestrator too — `rpi5`-style ids
 appear in the worker list.
 
 Start it from the directory tasks should run in: a worker's working directory is

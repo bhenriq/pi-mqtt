@@ -310,6 +310,55 @@ async function endSession(): Promise<void> {
 	session = undefined;
 }
 
+/** Local state plus who else is on the broker, as far as this role can see. */
+function statusText(): string {
+	if (!session) return "pi-mqtt is not configured in this session (no role or broker). See SETUP.md.";
+
+	const { config, topics } = session;
+	const lines = [
+		`role:    ${config.role}`,
+		`worker:  ${config.worker.workerId}`,
+		`broker:  ${config.mqtt.url} (MQTT ${config.mqtt.protocolVersion})`,
+		`cluster: ${config.mqtt.cluster}`,
+		`topics:  ${topics.base}`,
+	];
+
+	if (!runtime) {
+		lines.push("state:   disconnected — /mqtt start to connect");
+		return lines.join("\n");
+	}
+
+	lines.push(`state:   connected (online: ${runtime.link.online})`);
+	const orchestrator = runtime.orchestrator;
+	if (orchestrator) {
+		const entries = orchestrator.entries();
+		const online = entries.filter((entry) => !entry.stale && entry.presence.state !== "offline");
+		const idle = online.filter((entry) => entry.presence.state === "idle");
+		const busy = online.filter((entry) => entry.presence.state === "busy");
+		const offline = entries.length - online.length;
+		lines.push(
+			`workers: ${entries.length} known — ${online.length} online (${idle.length} idle, ${busy.length} busy), ${offline} off`,
+		);
+		const outstanding = orchestrator.outstanding();
+		if (outstanding.length > 0) {
+			const running = outstanding.filter((record) => record.state === "running");
+			const queued = outstanding.length - running.length;
+			lines.push(`tasks:   ${outstanding.length} outstanding (${running.length} running, ${queued} queued)`);
+		}
+		lines.push(
+			entries.length === 0
+				? `No workers on ${topics.base} yet.`
+				: "detail:  /workers for the full table",
+		);
+	} else {
+		const presence = runtime.worker;
+		lines.push(presence ? `worker:  idle, listening for tasks` : "worker:  idle");
+		lines.push("peers:   not visible from a worker (the ACLs allow only its own topics)");
+	}
+
+	return lines.join("\n");
+}
+
 /** Why a tool or command cannot do its job right now. */
 function inactiveReason(): string {
 	if (!session) return "pi-mqtt is not configured in this session (no role or broker). See SETUP.md.";
@@ -562,10 +611,14 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("mqtt", {
-		description: "pi-mqtt status, or /mqtt start | /mqtt stop",
+		description: "pi-mqtt status (local state and connected workers), or /mqtt start | stop | restart",
 		handler: async (args, ctx) => {
 			const arg = args.trim().toLowerCase();
 
+			if (arg === "status") {
+				ctx.ui.notify(statusText(), "info");
+				return;
+			}
 			if (arg === "start") {
 				await connectRuntime(pi, ctx);
 				return;
@@ -585,30 +638,14 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 			if (arg) {
-				ctx.ui.notify("usage: /mqtt [start|stop|restart]", "warning");
+				ctx.ui.notify("usage: /mqtt [status|start|stop|restart]", "warning");
 				return;
 			}
 
 			const lines = logs
 				.slice(-12)
 				.map((line) => `${new Date(line.at).toISOString().slice(11, 19)} ${line.level.padEnd(5)} ${line.message}`);
-
-			if (!session) {
-				ctx.ui.notify("pi-mqtt is not configured in this session (no role or broker). See SETUP.md.", "info");
-				return;
-			}
-			const { config, topics } = session;
-			const header = [
-				`role:    ${config.role}`,
-				`worker:  ${config.worker.workerId}`,
-				`broker:  ${config.mqtt.url} (MQTT ${config.mqtt.protocolVersion})`,
-				`cluster: ${config.mqtt.cluster}`,
-				`topics:  ${topics.base}`,
-				runtime
-					? `state:   connected (online: ${runtime.link.online})`
-					: `state:   disconnected — /mqtt start to connect`,
-			].join("\n");
-			ctx.ui.notify([header, "", ...lines].join("\n"), "info");
+			ctx.ui.notify([statusText(), "", ...lines].join("\n"), "info");
 		},
 	});
 

@@ -114,6 +114,17 @@ export interface LoadOptions {
 	cwd: string;
 }
 
+/**
+ * Trim values that come from a file or the environment. A trailing newline in a
+ * password is invisible in the error it causes ("Not authorized"), and the same
+ * in a URL produces a hostname that cannot resolve.
+ */
+function tidy(value: string | undefined): string | undefined {
+	if (typeof value !== "string") return undefined;
+	const trimmed = value.trim();
+	return trimmed.length > 0 ? trimmed : undefined;
+}
+
 function normalizeRole(value: unknown): Role | undefined {
 	return value === "orchestrator" || value === "worker" ? value : undefined;
 }
@@ -136,7 +147,7 @@ export function loadConfig(options: LoadOptions): LoadResult {
 			reason: 'no role selected (pass --pi-mqtt-role orchestrator|worker, set PI_MQTT_ROLE, or add "role" to pi-mqtt.json)',
 		};
 	}
-	const url = env.PI_MQTT_URL ?? file?.mqtt?.url;
+	const url = tidy(env.PI_MQTT_URL) ?? tidy(file?.mqtt?.url);
 	if (!url) {
 		return { ok: false, reason: "no broker url (set PI_MQTT_URL or mqtt.url in pi-mqtt.json)" };
 	}
@@ -144,7 +155,7 @@ export function loadConfig(options: LoadOptions): LoadResult {
 	const urlError = validateBrokerUrl(url);
 	if (urlError) return { ok: false, reason: urlError };
 
-	const cluster = env.PI_MQTT_CLUSTER ?? file?.mqtt?.cluster ?? "dev";
+	const cluster = tidy(env.PI_MQTT_CLUSTER) ?? tidy(file?.mqtt?.cluster) ?? "dev";
 	if (!isValidIdentifier(cluster)) {
 		return {
 			ok: false,
@@ -155,13 +166,13 @@ export function loadConfig(options: LoadOptions): LoadResult {
 	// On a worker the MQTT username *is* the worker id: the broker's ACLs key on it.
 	// Falling back to it prevents the classic mismatch where a session announces one
 	// id and authenticates as another, and then silently cannot read its own tasks.
-	const username = env.PI_MQTT_USERNAME ?? file?.mqtt?.username;
-	const workerId =
-		options.workerId ??
-		env.PI_MQTT_WORKER_ID ??
-		file?.worker?.workerId ??
-		(role === "worker" ? username : undefined) ??
-		defaultWorkerId();
+	const username = tidy(env.PI_MQTT_USERNAME) ?? tidy(file?.mqtt?.username);
+	const workerId = [
+		tidy(options.workerId),
+		tidy(env.PI_MQTT_WORKER_ID),
+		tidy(file?.worker?.workerId),
+		role === "worker" ? username : undefined,
+	].find((candidate) => candidate !== undefined) ?? defaultWorkerId();
 	if (!isValidIdentifier(workerId)) {
 		return {
 			ok: false,
@@ -188,14 +199,14 @@ export function loadConfig(options: LoadOptions): LoadResult {
 				// Environment wins; the file is a fallback for a machine you configure
 				// once. Keep such a file out of git (pi-mqtt.json is gitignored here).
 				username,
-				password: env.PI_MQTT_PASSWORD ?? file?.mqtt?.password,
+				password: tidy(env.PI_MQTT_PASSWORD) ?? tidy(file?.mqtt?.password),
 				cluster,
 				protocolVersion: rawVersion,
 				keepaliveSec: file?.mqtt?.keepaliveSec ?? 30,
 				reconnectMs: file?.mqtt?.reconnectMs ?? 2000,
 				// Env overrides exist so a launcher can point at a TLS broker without
 				// writing a config file.
-				caFile: env.PI_MQTT_CA_FILE ?? file?.mqtt?.caFile,
+				caFile: tidy(env.PI_MQTT_CA_FILE) ?? tidy(file?.mqtt?.caFile),
 				rejectUnauthorized:
 					env.PI_MQTT_REJECT_UNAUTHORIZED === "0" ? false : (file?.mqtt?.rejectUnauthorized ?? true),
 			},
@@ -207,7 +218,7 @@ export function loadConfig(options: LoadOptions): LoadResult {
 				heartbeatMs: file?.worker?.heartbeatMs ?? 30_000,
 				taskExpirySec: file?.worker?.taskExpirySec ?? 900,
 			},
-			logDir: file?.logDir ?? join(homedir(), ".pi", "agent", "pi-mqtt"),
+			logDir: tidy(file?.logDir) ?? join(homedir(), ".pi", "agent", "pi-mqtt"),
 			connect: rawConnect,
 		},
 	};

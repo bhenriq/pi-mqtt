@@ -150,8 +150,9 @@ Orchestrator tools (active only in an orchestrator session):
 | `list_tasks` | Task states: queued, sent, running, done, timeout, cancelled, lost |
 | `cancel_task` | Cooperative abort; the worker reports partial output |
 
-Commands: `/workers`, `/tasks`, and `/mqtt` — bare for status, or `/mqtt start`
-and `/mqtt stop` to connect and disconnect.
+Commands: `/workers` (the peer table), `/tasks` (dispatched tasks), and `/mqtt` —
+bare or `/mqtt status` for local state and counts, `/mqtt start` / `/mqtt stop` /
+`/mqtt restart` to connect and disconnect.
 
 Connecting is explicit: a configured session still opens no socket until `/mqtt start`,
 unless it was launched with `--pi-mqtt-start` or its config says `"connect": "auto"`.
