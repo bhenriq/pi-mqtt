@@ -6,7 +6,7 @@
     "username": "worker-1",
     "password": "REPLACE_WITH_BROKER_PASSWORD",
     "protocolVersion": 5,
-    "keepaliveSec": 30,
+    "keepaliveSec": 15,
     "reconnectMs": 2000,
     "rejectUnauthorized": true
   },

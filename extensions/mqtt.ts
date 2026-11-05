@@ -277,6 +277,8 @@ async function connectRuntime(pi: ExtensionAPI, ctx: ExtensionContext): Promise<
 		pi.setActiveTools([...new Set([...pi.getActiveTools(), ...ORCHESTRATOR_TOOLS])]);
 	} else {
 		const presence = new Presence(link, topics, identity, config.worker.heartbeatMs, log);
+		// Reconnect: re-announce immediately instead of waiting for the next heartbeat.
+		link.onReconnect = () => presence.republish();
 		presence.start();
 		connected.presence = presence;
 		const worker = new Worker(link, topics, { pi, ctx: () => currentCtx, config, presence, log });
@@ -329,6 +331,15 @@ function statusText(): string {
 	}
 
 	lines.push(`state:   connected (online: ${runtime.link.online})`);
+	const reconnects = runtime.link.reconnects;
+	if (reconnects > 0) {
+		const last = runtime.link.lastClose;
+		const when = last ? new Date(last.at).toISOString().slice(11, 19) : "?";
+		const why = last
+			? `${last.source}${last.code !== undefined ? ` ${last.code}` : ""}${last.reason ? ` ${last.reason}` : ""}`
+			: "unknown";
+		lines.push(`drops:   ${reconnects} (last ${when}: ${why})`);
+	}
 	const orchestrator = runtime.orchestrator;
 	if (orchestrator) {
 		const entries = orchestrator.entries();

@@ -202,7 +202,7 @@ export function loadConfig(options: LoadOptions): LoadResult {
 				password: tidy(env.PI_MQTT_PASSWORD) ?? tidy(file?.mqtt?.password),
 				cluster,
 				protocolVersion: rawVersion,
-				keepaliveSec: file?.mqtt?.keepaliveSec ?? 30,
+				keepaliveSec: file?.mqtt?.keepaliveSec ?? 15,
 				reconnectMs: file?.mqtt?.reconnectMs ?? 2000,
 				// Env overrides exist so a launcher can point at a TLS broker without
 				// writing a config file.

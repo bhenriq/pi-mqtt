@@ -104,6 +104,13 @@ export class Presence {
 		void this.publish();
 	}
 
+	/** Republish the current state now (used after a reconnect). */
+	republish(): void {
+		if (this.stopped) return;
+		this.current = { ...this.current, updatedAt: Date.now() };
+		void this.publish();
+	}
+
 	stop(): void {
 		if (this.stopped) return;
 		this.stopped = true;

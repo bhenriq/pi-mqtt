@@ -14,6 +14,22 @@ export interface PublishOptions {
 	expirySec?: number;
 }
 
+export interface CloseInfo {
+	at: number;
+	source: "ws" | "mqtt" | "socket";
+	code?: number;
+	reason?: string;
+}
+
+/** Turns a WebSocket close code into something readable in a log line. */
+function describeCloseCode(code: number | undefined): string {
+	if (code === undefined) return "no code";
+	if (code === 1000) return "1000 normal";
+	if (code === 1001) return "1001 going away";
+	if (code === 1006) return "1006 abnormal (no close frame)";
+	return `${code}`;
+}
+
 export type MessageHandler = (topic: string, payload: Json) => void;
 export type LogFn = (level: "info" | "warn" | "error", message: string) => void;
 
@@ -30,6 +46,20 @@ export class MqttLink {
 	private closed = false;
 	/** Suppresses per-retry error spam until the first successful handshake. */
 	private everConnected = false;
+	private closeInfo: CloseInfo | undefined;
+	private reconnectCount = 0;
+	private readonly trackedStreams = new WeakSet<object>();
+	/** Called after every successful (re)connect, including the first. */
+	onReconnect?: () => void;
+
+	/** Most recent abnormal close, for /mqtt status. */
+	get lastClose(): CloseInfo | undefined {
+		return this.closeInfo;
+	}
+
+	get reconnects(): number {
+		return this.reconnectCount;
+	}
 
 	constructor(
 		private readonly config: MqttConfig,
@@ -70,18 +100,33 @@ export class MqttLink {
 			this.everConnected = true;
 			options.log("info", `mqtt connected to ${config.url} as ${options.clientId}`);
 			// clean:true means the broker forgot our subscriptions; re-apply them.
+			this.trackStream(client);
 			for (const filter of this.handlers.keys()) {
 				client.subscribe(filter, { qos: 1 }, (error) => {
 					if (error) options.log("error", `subscribe ${filter} failed: ${error.message}`);
 				});
 			}
 			options.onOnline?.();
+			this.onReconnect?.();
 		});
 		client.on("reconnect", () => options.log("info", "mqtt reconnecting"));
 		client.on("close", () => {
-			// A failed first handshake is reported by the connect() rejection.
-			if (!this.closed && this.everConnected) options.log("warn", "mqtt connection closed");
+			if (this.closed || !this.everConnected) return;
+			this.reconnectCount += 1;
+			if (!this.closeInfo) this.closeInfo = { at: Date.now(), source: "socket" };
+			const info = this.closeInfo;
+			options.log(
+				"warn",
+				`mqtt connection closed (${info.source}${info.code !== undefined ? " " + describeCloseCode(info.code) : ""}${info.reason ? `, ${info.reason}` : ""}), reconnecting`,
+			);
 		});
+		// MQTT 5 server-initiated DISCONNECT carries a reason code: the broker is
+		// telling us why, which a bare socket close never does.
+		client.on("disconnect", (packet) => {
+			const reasonCode = (packet as { reasonCode?: number } | undefined)?.reasonCode;
+			this.closeInfo = { at: Date.now(), source: "mqtt", code: reasonCode, reason: "broker DISCONNECT" };
+		});
+
 		client.on("error", (error) => {
 			// Before the first handshake the connect() rejection reports it once.
 			if (this.everConnected) options.log("error", `mqtt error: ${error.message}`);
@@ -160,6 +205,22 @@ export class MqttLink {
 		if (!client) return;
 		await new Promise<void>((resolve) => {
 			client.end(false, {}, () => resolve());
+		});
+	}
+
+	/** Attach close-code reporting to the transport socket, once per socket. */
+	private trackStream(client: MqttClient): void {
+		const stream = (client as unknown as { stream?: { on?: (event: string, cb: (...args: unknown[]) => void) => void } }).stream;
+		if (!stream || typeof stream.on !== "function") return;
+		if (this.trackedStreams.has(stream as object)) return;
+		this.trackedStreams.add(stream as object);
+		stream.on("close", (code?: unknown, reason?: unknown) => {
+			this.closeInfo = {
+				at: Date.now(),
+				source: "ws",
+				code: typeof code === "number" ? code : undefined,
+				reason: reason instanceof Uint8Array ? new TextDecoder().decode(reason).slice(0, 60) : undefined,
+			};
 		});
 	}
 }

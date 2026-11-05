@@ -157,6 +157,13 @@ bare or `/mqtt status` for local state and counts, `/mqtt start` / `/mqtt stop` 
 Connecting is explicit: a configured session still opens no socket until `/mqtt start`,
 unless it was launched with `--pi-mqtt-start` or its config says `"connect": "auto"`.
 
+Dropped connections are re-established automatically (2s), subscriptions are re-applied, and a
+worker re-announces its presence immediately instead of waiting for the next heartbeat.
+`/mqtt status` reports `drops: N (last <time>: <source> <code>)` once a connection has been lost,
+which distinguishes a normal close (`1000`) from an abnormal one (`1006`, no close frame — usually
+an intermediary or a sleeping machine). `keepaliveSec` defaults to 15, so a dead socket is noticed
+in about 22s.
+
 `dispatch_task` options worth knowing: `notify: "silent" | "wake"`, `ifBusy: "fail" | "wait"`,
 `timeoutMs`, `maxCostUsd`, and `repo: { baseRef | baseSha, branch }`.
 
