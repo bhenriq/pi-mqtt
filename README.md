@@ -222,9 +222,9 @@ password), `broker` (where it lives), and optional `worker` (behaviour such as
 `heartbeatMs`). Defaults are omitted, so a minimal file stays minimal.
 
 `name` is the machine's stable base name. A worker's session id is derived, never
-typed: `<worker name>-<pi session name>` (`prudential-abcd`), or just the base when the pi
-session is unnamed. Two windows of the same session become `prudential-abcd-2`. Without
-`name`, the hostname is the base.
+typed: `<name>_<pi session name>` (`prudential_billing`). When the pi session is unnamed,
+the first four characters of its session id are used instead (`prudential_01a1`). Without
+`name`, the computer name is the base.
 
 An orchestrator is the same file with `"role": "orchestrator"`.
 
@@ -238,12 +238,13 @@ A **room** is a named namespace plus one shared password: same name and password
 means you see each other, anything else and you do not. There are no per-machine
 accounts to create — hand someone the room password and they can join.
 
-The **worker id** is declared, not authenticated, and it is per *session*: several
+The **session id** is declared, not authenticated, and it is per *session*: several
 sessions can join from one host, and nothing is asked: the id is
-`<worker name>-<pi session name>`, suffixed (`-2`) if that is already live. An
-orchestrator's id is the pi session name. `--pi-mqtt-id` (or `worker.workerId`) is the
-only way to state an exact id — it never prompts and never gets a suffix, which is what
-you want for a worker you pin tasks to.
+`<name>_<session name>` for workers *and* orchestrators. **Collisions are resolved by
+takeover, not by renaming** — a second session deriving the same id evicts the first,
+which stops with `worker id "x" was taken over by another session`. Set `id` in the file
+(or pass `--pi-mqtt-id`) to state an exact id instead; that is the form to use for a
+worker you pin tasks to.
 
 Orchestrators announce themselves on `pi/v1/<room>/orchestrators/<id>/presence`, so
 you can see who is coordinating: `/mqtt status` lists them and `/workers` prints a separate

@@ -230,8 +230,7 @@ async function connectRuntime(pi: ExtensionAPI, ctx: ExtensionContext): Promise<
 
 	const { topics, log } = current;
 	let config = current.config;
-	const chosen = await resolveSessionId(pi, ctx, config, topics);
-	if (!chosen) return false;
+	const chosen = resolveSessionId(pi, ctx, config);
 	sessionWorkerId = chosen;
 	config = { ...config, worker: { ...config.worker, workerId: chosen } };
 	const git = readGitInfo(ctx.cwd);
@@ -247,13 +246,9 @@ async function connectRuntime(pi: ExtensionAPI, ctx: ExtensionContext): Promise<
 	};
 
 	const isWorker = config.role === "worker";
-	// A deterministic client id makes the broker enforce "one session per worker id":
-	// a second session with the same id takes the connection over. Orchestrators keep
-	// a random suffix so two shells on one machine do not evict each other.
-	const clientId =
-		config.role === "worker"
-			? `pi-mqtt-${config.mqtt.cluster}-${config.worker.workerId}`
-			: `pi-mqtt-orchestrator-${config.worker.workerId}-${Math.random().toString(36).slice(2, 8)}`;
+	// Deterministic client id: one live session per id, and a second one takes the
+	// connection over. That is the intended collision policy: no suffixes, no refusals.
+	const clientId = `pi-mqtt-${config.mqtt.cluster}-${config.worker.workerId}`;
 	const link = new MqttLink(config.mqtt, {
 		clientId,
 		...(isWorker ? { will: { topic: topics.presence(config.worker.workerId), payload: buildPresence(identity, "offline") } } : {}),
@@ -326,7 +321,7 @@ async function connectRuntime(pi: ExtensionAPI, ctx: ExtensionContext): Promise<
 		link.onTakenOver = () => {
 			void disconnectRuntime();
 			ctx.ui.notify(
-				`pi-mqtt: worker id "${config.worker.workerId}" was taken over by another session; this one stopped. Use a different --pi-mqtt-id.`,
+				`pi-mqtt: session "${config.worker.workerId}" was taken over by another session; this one stopped. Rename the pi session, or set an exact id with --pi-mqtt-id.`,
 				"error",
 			);
 		};
@@ -440,61 +435,25 @@ function sanitizeId(value: string): string {
  * suffixed (-2, -3, …) rather than refused: several sessions may join from one host.
  */
 /**
- * The session's identity in the room: derived, never chosen.
+ * The session's identity in the room: `<name>_<session>`, derived and never asked for.
  *
- * A worker's id is `<worker name>-<pi session name>` (or just the base when the pi
- * session is unnamed); an orchestrator's is the pi session name. An explicit id
- * (--pi-mqtt-id, PI_MQTT_WORKER_ID, worker.workerId) is used verbatim and never
- * suffixed, which is the way to pin a long-lived worker.
+ * `name` comes from the config file, else the computer name. The session part is the pi
+ * session name, or the first four characters of the pi session id when the session is
+ * unnamed, so two windows never collide by accident. An explicitly configured id wins
+ * outright. There is no suffixing: if two sessions derive the same id, the second takes
+ * the first one's place — the broker evicts it, and the evicted session stops.
  */
-async function resolveSessionId(
-	pi: ExtensionAPI,
-	ctx: ExtensionContext,
-	config: AppConfig,
-	topics: Topics,
-): Promise<string | undefined> {
-	const explicit = sanitizeId(String(pi.getFlag(FLAG_ID) ?? process.env.PI_MQTT_WORKER_ID ?? ""));
-	if (explicit) return explicit;
+function resolveSessionId(pi: ExtensionAPI, ctx: ExtensionContext, config: AppConfig): string {
+	if (config.worker.explicitId) return config.worker.workerId;
 	if (sessionWorkerId) return sessionWorkerId;
 
-	const sessionName = sanitizeId(pi.getSessionName() ?? "");
 	const base = sanitizeId(config.worker.name ?? "") || config.worker.workerId;
-	const derived =
-		config.role === "worker"
-			? sessionName && sessionName !== base
-				? `${base}-${sessionName}`
-				: base
-			: sessionName || base;
-
-	// A derived id must be unique: the same worker name and session name twice (two
-	// windows of the same session) becomes -2, -3, ...
-	const link = new MqttLink(config.mqtt, {
-		clientId: `pi-mqtt-probe-${Math.random().toString(36).slice(2, 8)}`,
-		log: () => {},
-	});
-	try {
-		await link.connect();
-	} catch {
-		return derived;
-	}
-	try {
-		const live = async (id: string) => {
-			const existing = await probePresence(link, topics, id, 900);
-			return Boolean(existing && existing.state !== "offline" && Date.now() - existing.updatedAt < config.worker.heartbeatMs * 3);
-		};
-		if (!(await live(derived))) return derived;
-		for (let suffix = 2; suffix <= 20; suffix += 1) {
-			const candidate = `${derived}-${suffix}`;
-			if (!(await live(candidate))) {
-				ctx.ui.notify(`pi-mqtt: "${derived}" is live; joining as "${candidate}".`, "info");
-				return candidate;
-			}
-		}
-		ctx.ui.notify(`pi-mqtt: no free id near "${derived}".`, "error");
-		return undefined;
-	} finally {
-		await link.close();
-	}
+	const named = sanitizeId(pi.getSessionName() ?? "");
+	const fromSessionId = (ctx.sessionManager.getSessionId() ?? "")
+		.replace(/[^A-Za-z0-9]/g, "")
+		.slice(0, 4)
+		.toLowerCase();
+	return `${base}_${named || fromSessionId || "session"}`;
 }
 
 /** Why a tool or command cannot do its job right now. */

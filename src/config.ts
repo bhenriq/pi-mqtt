@@ -28,8 +28,10 @@ export interface MqttConfig {
 
 export interface WorkerConfig {
 	workerId: string;
-	/** Stable base for the join prefill: `<name>-<pi session name>`. */
+	/** Stable base for the session id: `<name>_<session>`. */
 	name?: string;
+	/** True when an id was configured rather than derived from the hostname. */
+	explicitId: boolean;
 	/** Allowlisted repo name -> local path. Never taken from the broker. */
 	repos: Record<string, string>;
 	defaultRepo?: string;
@@ -287,13 +289,14 @@ export function loadConfig(options: LoadOptions): LoadResult {
 	const configuredUsername = tidy(env.PI_MQTT_USERNAME) ?? tidy(file?.mqtt?.username);
 	const username = token ? (configuredUsername ?? "cluster") : configuredUsername;
 	const name = tidy(file?.name) ?? tidy(file?.worker?.name);
-	const workerId = [
+	const explicitId = [
 		tidy(options.workerId),
 		tidy(env.PI_MQTT_WORKER_ID),
 		tidy(file?.id),
 		tidy(file?.worker?.workerId),
 		role === "worker" ? configuredUsername : undefined,
-	].find((candidate) => candidate !== undefined) ?? defaultWorkerId();
+	].find((candidate) => candidate !== undefined);
+	const workerId = explicitId ?? defaultWorkerId();
 	if (!isValidIdentifier(workerId)) {
 		return {
 			ok: false,
@@ -335,6 +338,7 @@ export function loadConfig(options: LoadOptions): LoadResult {
 			worker: {
 				workerId,
 				name,
+				explicitId: explicitId !== undefined,
 				repos: file?.worker?.repos ?? {},
 				defaultRepo: file?.worker?.defaultRepo,
 				allowModelOverride: file?.worker?.allowModelOverride ?? false,

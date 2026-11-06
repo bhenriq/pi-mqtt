@@ -90,13 +90,11 @@ visibility. There are no per-machine accounts to create: hand out the room passw
 another session can join.
 
 **The session id is derived and scoped to the session.** `name` is the machine's base, and
-the id is `<name>-<pi session name>` (`prudential-billing`), or the base alone when the pi
-session is unnamed. A second window of the same session becomes `prudential-billing-2`.
-Nothing prompts. Set `id` in the file (or pass `--pi-mqtt-id`) to state an exact id that is
-never suffixed — use it for workers you pin tasks to.
-
-If the same pinned id is claimed twice, the broker evicts the older session, which stops
-with `worker id "x" was taken over by another session`.
+the id is `<name>_<pi session name>` (`prudential_billing`) — for workers and orchestrators
+alike. An unnamed pi session contributes the first four characters of its session id
+(`prudential_01a1`). Nothing prompts, and there is no renaming: a second session deriving
+the same id takes the first one's place, and the evicted session stops. Set `id` in the
+file (or pass `--pi-mqtt-id`) for an exact id — the form to use when tasks are pinned.
 
 ### Why these values
 
@@ -104,7 +102,7 @@ with `worker id "x" was taken over by another session`.
 |---|---|
 | `role` | `worker` or `orchestrator`. Without it (here, in `PI_MQTT_ROLE`, or via `--pi-mqtt-role`) the extension stays inert |
 | `name` | This machine's name: the base for the session id. Defaults to the hostname |
-| `id` | Optional exact session id. Never suffixed, never derived |
+| `id` | Optional exact session id. Overrides the derived `<name>_<session>` |
 | `broker.url` | The scheme picks the transport: `wss://` (TLS WebSocket, usual for a hosted broker), `mqtts://` (TLS on a raw port), `mqtt://`/`ws://` (plain, local only) |
 | `room.name` | The room — also the topic prefix. Everyone who should see each other must share it |
 | `room.password` | The room's shared password. Anyone holding it can join the room |
