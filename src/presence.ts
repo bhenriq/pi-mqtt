@@ -87,6 +87,8 @@ export class Presence {
 		identity: PresenceIdentity,
 		private readonly heartbeatMs: number,
 		private readonly log: LogFn,
+		/** Retained presence lifetime: a dead worker's entry disappears on its own. */
+		private readonly expirySec = 86_400,
 	) {
 		this.current = buildPresence(identity, "idle");
 	}
@@ -121,7 +123,10 @@ export class Presence {
 		this.stopped = true;
 		if (this.timer) clearInterval(this.timer);
 		const payload = { ...this.current, state: "offline" as const, updatedAt: Date.now() };
-		void this.link.publish(this.topics.presence(this.current.workerId), payload, { retain: true });
+		void this.link.publish(this.topics.presence(this.current.workerId), payload, {
+			retain: true,
+			expirySec: this.expirySec,
+		});
 	}
 
 	private async publish(): Promise<void> {
@@ -130,7 +135,7 @@ export class Presence {
 			await this.link.publish(
 				this.topics.presence(this.current.workerId),
 				{ ...this.current, updatedAt: Date.now() },
-				{ retain: true },
+				{ retain: true, expirySec: this.expirySec },
 			);
 		} catch (error) {
 			this.log("warn", `presence publish failed: ${(error as Error).message}`);

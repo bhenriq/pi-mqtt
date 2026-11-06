@@ -241,6 +241,9 @@ the file — is used verbatim with no question and no suffixing, so a collision 
 error rather than a rename. That is the form to use for a long-lived worker you pin
 tasks to.
 
+`/mqtt status` reports your `session:` name (from `pi --name` or `/name`) next to the
+worker id, so a named session is identifiable without publishing presence.
+
 Because the client id is `<room>-<worker-id>`, the broker permits one live session per
 id: if a pinned id is claimed twice, the older session is evicted and stops with
 `worker id "x" was taken over by another session`.
@@ -299,8 +302,9 @@ pi/v1/<room>/workers/<id>/ack        worker → orchestrator (task started)
 pi/v1/<room>/results/<taskId>        worker → orchestrator
 ```
 
-Presence is retained, so `list_workers` is a local map read rather than a network
-round trip. A worker's unpublished state is detected two ways: the Last Will on
+Presence is retained with a 24-hour expiry, so a worker that disappears does not
+linger in the roster forever. Retained means `list_workers` is a local map read rather
+than a network round trip. A worker's unpublished state is detected two ways: the Last Will on
 crash, and heartbeat age (`3 × heartbeatMs` → shown as `idle?`/`busy?`).
 
 ## Testing without Docker

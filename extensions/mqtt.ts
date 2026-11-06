@@ -362,6 +362,7 @@ function statusText(): string {
 	const { config, topics } = session;
 	const lines = [
 		`role:    ${config.role}`,
+		`session: ${api?.getSessionName() ?? "(unnamed)"}`,
 		`worker:  ${runtime?.config.worker.workerId ?? config.worker.workerId}`,
 		`broker:  ${config.mqtt.url} (MQTT ${config.mqtt.protocolVersion})`,
 		`room:    ${config.mqtt.cluster}`,
