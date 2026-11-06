@@ -213,11 +213,16 @@ One file per machine, then no flags and no environment:
   "role": "worker",
   "room": "dev",
   "roomPassword": "<the room password>",
+  "worker": { "name": "prudential" },
   "mqtt": {
     "url": "wss://broker-production-0bfd.up.railway.app"
   }
 }
 ```
+
+`worker.name` is the machine's stable base name; the join prompt is pre-filled with
+`<name>-<pi session name>` (`prudential-abcd`), so several sessions on one host are
+distinguishable without inventing names. Without it, the hostname is the base.
 
 An orchestrator is the same file with `"role": "orchestrator"`.
 
@@ -232,11 +237,11 @@ means you see each other, anything else and you do not. There are no per-machine
 accounts to create — hand someone the room password and they can join.
 
 The **worker id** is declared, not authenticated, and it is per *session*: several
-sessions can join from one host. Joining requires a name — on `/mqtt start` you are
-asked for one, prefilled with the pi session name (`pi --name billing`). An unnamed
-session is refused, and so is an empty answer: two sessions on one host is the normal
-case, so guessing from the hostname would be wrong. A name that is already live is
-suffixed (`billing`, `billing-2`).
+sessions can join from one host. `/mqtt start` asks for it, pre-filled with
+`<worker name>-<pi session name>`; what you type is used exactly, and pressing enter
+accepts the prefill. An accepted prefill that is already live gets a suffix
+(`prudential-abcd-2`); a name you typed yourself is refused instead of renamed
+(`session "x" is already live`). An orchestrator's prefill is the pi session name alone.
 
 An id given explicitly — `--pi-mqtt-id`, `PI_MQTT_WORKER_ID`, or `worker.workerId` in
 the file — is used verbatim with no question and no suffixing, so a collision is an

@@ -28,6 +28,8 @@ export interface MqttConfig {
 
 export interface WorkerConfig {
 	workerId: string;
+	/** Stable base for the join prefill: `<name>-<pi session name>`. */
+	name?: string;
 	/** Allowlisted repo name -> local path. Never taken from the broker. */
 	repos: Record<string, string>;
 	defaultRepo?: string;
@@ -294,6 +296,7 @@ export function loadConfig(options: LoadOptions): LoadResult {
 			},
 			worker: {
 				workerId,
+				name: tidy(file?.worker?.name),
 				repos: file?.worker?.repos ?? {},
 				defaultRepo: file?.worker?.defaultRepo,
 				allowModelOverride: file?.worker?.allowModelOverride ?? false,

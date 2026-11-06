@@ -375,8 +375,8 @@ function statusText(): string {
 	const { config, topics } = session;
 	const lines = [
 		`role:    ${config.role}`,
-		`session: ${runtime?.config.worker.workerId ?? api?.getSessionName() ?? "(unnamed)"}`,
-		`worker:  ${runtime?.config.worker.workerId ?? config.worker.workerId}`,
+		`session: ${api?.getSessionName() ?? "(unnamed)"}`,
+		`session id: ${runtime ? runtime.config.worker.workerId : "(not joined)"}`,
 		`broker:  ${config.mqtt.url} (MQTT ${config.mqtt.protocolVersion})`,
 		`room:    ${config.mqtt.cluster}`,
 		`topics:  ${topics.base}`,
@@ -446,10 +446,11 @@ function sanitizeId(value: string): string {
 /**
  * The session's identity in the room.
  *
- * An explicitly configured id (flag, env, or `worker.workerId`) is used verbatim.
- * Otherwise the session must be named: pi's session name (`pi --name billing`, `/name`)
- * is the default offered, and an unnamed session is refused rather than silently called
- * after its host — two sessions on one host are the normal case here.
+ * An explicit id (flag, env, or `worker.workerId`) is used verbatim. Otherwise the
+ * join prompt is pre-filled with `<worker name>-<pi session name>` for a worker (the
+ * pi session name alone for an orchestrator), and whatever is typed there is used
+ * exactly. An accepted prefill gets a numeric suffix if it is already live; something
+ * typed by hand does not, because renaming a deliberate choice is a surprise.
  */
 async function chooseSessionId(
 	pi: ExtensionAPI,
@@ -458,31 +459,30 @@ async function chooseSessionId(
 	topics: Topics,
 	interactive: boolean,
 ): Promise<string | undefined> {
-	const explicit = sanitizeId(
-		String(pi.getFlag(FLAG_ID) ?? process.env.PI_MQTT_WORKER_ID ?? ""),
-	);
+	const explicit = sanitizeId(String(pi.getFlag(FLAG_ID) ?? process.env.PI_MQTT_WORKER_ID ?? ""));
 	if (explicit) return sessionWorkerId ?? explicit;
 
-	const named = sanitizeId(pi.getSessionName() ?? "") || sessionWorkerId;
-	if (named) return named;
+	const sessionName = sanitizeId(pi.getSessionName() ?? "");
+	const base = sanitizeId(config.worker.name ?? "") || config.worker.workerId;
+	const prefill = config.role === "worker"
+		? sessionName && sessionName !== base
+			? `${base}-${sessionName}`
+			: base
+		: sessionName || base;
+
+	if (sessionWorkerId) return sessionWorkerId;
 
 	if (!interactive || !ctx.hasUI) {
-		ctx.ui.notify(
-			'pi-mqtt: this session has no name. Start pi with --name <name>, or set worker.workerId / --pi-mqtt-id.',
-			"error",
-		);
-		return undefined;
+		return prefill;
 	}
 
-	const answer = await ctx.ui.input("Session name (required)", "");
+	const answer = await ctx.ui.input("Session id (press enter to use the default)", prefill);
 	if (answer === undefined) return undefined;
-	const chosen = sanitizeId(answer);
-	if (!chosen) {
-		ctx.ui.notify("pi-mqtt: a session name is required to join a room.", "warning");
-		return undefined;
-	}
+	const typed = sanitizeId(answer);
+	const chosen = typed || prefill;
+	const edited = typed.length > 0 && typed !== prefill;
 
-	// A live worker with that name gets a suffix; an orchestrator name may repeat.
+	// Only an accepted prefill is renamed on collision.
 	const link = new MqttLink(config.mqtt, {
 		clientId: `pi-mqtt-probe-${Math.random().toString(36).slice(2, 8)}`,
 		log: () => {},
@@ -492,20 +492,25 @@ async function chooseSessionId(
 	} catch {
 		return chosen;
 	}
-	let candidate = chosen;
 	try {
-		if (config.role === "worker") {
-			for (let suffix = 2; suffix <= 20; suffix += 1) {
-				const existing = await probePresence(link, topics, candidate, 900);
-				const live = existing && existing.state !== "offline" && Date.now() - existing.updatedAt < config.worker.heartbeatMs * 3;
-				if (!live) break;
-				candidate = `${chosen}-${suffix}`;
-			}
+		const live = async (id: string) => {
+			const existing = await probePresence(link, topics, id, 900);
+			return Boolean(existing && existing.state !== "offline" && Date.now() - existing.updatedAt < config.worker.heartbeatMs * 3);
+		};
+		if (!(await live(chosen))) return chosen;
+		if (edited) {
+			ctx.ui.notify(`pi-mqtt: session "${chosen}" is already live; pick another id.`, "error");
+			return undefined;
 		}
+		for (let suffix = 2; suffix <= 20; suffix += 1) {
+			const candidate = `${chosen}-${suffix}`;
+			if (!(await live(candidate))) return candidate;
+		}
+		ctx.ui.notify(`pi-mqtt: no free id near "${chosen}".`, "error");
+		return undefined;
 	} finally {
 		await link.close();
 	}
-	return candidate;
 }
 
 /** Why a tool or command cannot do its job right now. */
@@ -533,6 +538,7 @@ function draftFromConfig(config: AppConfig | undefined): Draft {
 	draft.mqtt.protocolVersion = config.mqtt.protocolVersion;
 	draft.mqtt.rejectUnauthorized = config.mqtt.rejectUnauthorized;
 	draft.worker.workerId = config.worker.workerId;
+	draft.worker.name = config.worker.name;
 	draft.worker.heartbeatMs = config.worker.heartbeatMs;
 	draft.worker.taskExpirySec = config.worker.taskExpirySec;
 	draft.worker.allowModelOverride = config.worker.allowModelOverride;

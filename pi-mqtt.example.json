@@ -10,6 +10,7 @@
     "rejectUnauthorized": true
   },
   "worker": {
+    "name": "REPLACE_WITH_A_NAME",
     "heartbeatMs": 30000,
     "taskExpirySec": 900,
     "repos": {},

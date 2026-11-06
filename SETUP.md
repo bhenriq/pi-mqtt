@@ -56,6 +56,7 @@ environment variable.
   "role": "worker",
   "room": "dev",
   "roomPassword": "<the room password>",
+  "worker": { "name": "prudential" },
   "mqtt": {
     "url": "wss://broker-production-0bfd.up.railway.app"
   }
@@ -92,11 +93,12 @@ else; a different room name or a different password means a different room and n
 visibility. There are no per-machine accounts to create: hand out the room password and
 another session can join.
 
-**The worker id is declared, not authenticated, and scoped to the session.** Running a
-second `pi` on the same machine is fine, but joining needs a name: `/mqtt start` asks for
-one (prefilled with the pi session name, `pi --name billing`), and an empty answer is
-refused. A name already in use becomes `billing-2`. Pass `--pi-mqtt-id` (or set
-`worker.workerId`) for an exact, stable id that is never renamed and never prompts.
+**The session id is declared, not authenticated, and scoped to the session.** `worker.name`
+in the file is the machine's base; `/mqtt start` pre-fills the id with
+`<worker name>-<pi session name>` (`prudential-billing`) and you may type anything instead.
+Accepting the prefill yields a suffix if it is already live; a name you typed is refused
+rather than renamed. Pass `--pi-mqtt-id` (or `worker.workerId`) for an exact id that never
+prompts.
 
 If the same pinned id is claimed twice, the broker evicts the older session, which stops
 with `worker id "x" was taken over by another session`.

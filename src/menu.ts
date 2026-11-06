@@ -32,6 +32,7 @@ export interface Draft {
 		rejectUnauthorized?: boolean;
 	};
 	worker: {
+		name?: string;
 		workerId?: string;
 		heartbeatMs?: number;
 		taskExpirySec?: number;
@@ -187,7 +188,7 @@ export async function runConfigMenu(deps: MenuDeps): Promise<void> {
 			`room          ${show(draft.room ?? draft.mqtt.cluster)}${envNote("room")}`,
 			`room password ${show(draft.roomPassword ?? draft.mqtt.token ?? draft.mqtt.password, true)}${envNote("roomPassword")}`,
 			`connect       ${show(draft.connect)}${envNote("connect")}`,
-			`worker id     ${show(draft.worker.workerId ?? draft.mqtt.username)} (from username)`,
+			`worker name   ${show(draft.worker.name ?? "(hostname)")}`,
 			"──────────────────────────────",
 			"Test connection",
 			"Show effective config",
@@ -268,15 +269,14 @@ export async function runConfigMenu(deps: MenuDeps): Promise<void> {
 			continue;
 		}
 
-		if (choice.startsWith("worker id")) {
+		if (choice.startsWith("worker name")) {
 			const value = await askText(
 				ctx,
-				"worker id (must equal the MQTT username when the broker's ACLs key on it; empty = username)",
-				draft.worker.workerId,
+				"worker name (the join prompt is pre-filled with <name>-<pi session name>)",
+				draft.worker.name,
 			);
 			if (value === undefined) continue;
-			if (value === draft.mqtt.username) draft.worker.workerId = "";
-			else draft.worker.workerId = value;
+			draft.worker.name = value;
 			continue;
 		}
 
@@ -299,7 +299,7 @@ export async function runConfigMenu(deps: MenuDeps): Promise<void> {
 					`room:     ${show(draft.room ?? draft.mqtt.cluster)}${overrideNote("room")}`,
 					`roomPassword: ${show(draft.roomPassword ?? draft.mqtt.token ?? draft.mqtt.password, true)}${overrideNote("roomPassword")}`,
 					`connect:  ${show(draft.connect)}${overrideNote("connect")}`,
-					`worker:   ${show(draft.worker.workerId ?? draft.mqtt.username)}`,
+					`worker:   ${show(draft.worker.name ?? "(hostname)")} (prefill base)`,
 					`caFile:   ${show(draft.mqtt.caFile)}${overrideNote("caFile")}`,
 					`keepalive ${show(draft.mqtt.keepaliveSec ?? 15)}s · heartbeat ${show(
 						draft.worker.heartbeatMs ?? 30000,
