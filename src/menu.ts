@@ -189,6 +189,7 @@ export async function runConfigMenu(deps: MenuDeps): Promise<void> {
 			`room password ${show(draft.roomPassword ?? draft.mqtt.token ?? draft.mqtt.password, true)}${envNote("roomPassword")}`,
 			`connect       ${show(draft.connect)}${envNote("connect")}`,
 			`worker name   ${show(draft.worker.name ?? "(hostname)")}`,
+			`exact id      ${show(draft.id ?? "(derived)")}`,
 			"──────────────────────────────",
 			"Test connection",
 			"Show effective config",
@@ -251,6 +252,13 @@ export async function runConfigMenu(deps: MenuDeps): Promise<void> {
 				continue;
 			}
 			draft.room = value;
+			continue;
+		}
+
+		if (choice.startsWith("exact id")) {
+			const value = await askText(ctx, "exact session id (empty = derive <name>_<session>)", draft.id);
+			if (value === undefined) continue;
+			draft.id = value;
 			continue;
 		}
 

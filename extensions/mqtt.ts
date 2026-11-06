@@ -460,7 +460,7 @@ function resolveSessionId(pi: ExtensionAPI, ctx: ExtensionContext, config: AppCo
 function inactiveReason(): string {
 	if (!session) return "pi-mqtt is not configured in this session (no role or broker). See SETUP.md.";
 	if (!runtime) return "pi-mqtt is not connected — run /mqtt start (or launch with --pi-mqtt-start).";
-	return inactiveReason();
+	return "pi-mqtt is not active as an orchestrator in this session.";
 }
 
 function draftFromConfig(config: AppConfig | undefined): Draft {
@@ -468,6 +468,7 @@ function draftFromConfig(config: AppConfig | undefined): Draft {
 	if (!config) return draft;
 	draft.role = config.role;
 	draft.connect = config.connect;
+	draft.id = config.worker.explicitId ? config.worker.workerId : undefined;
 	draft.room = config.mqtt.cluster;
 	draft.roomPassword = config.mqtt.token;
 	draft.mqtt.url = config.mqtt.url;
@@ -501,6 +502,10 @@ function mergeDraft(raw: RawConfig, draft: Draft): RawConfig {
 
 	if (draft.role !== undefined) out.role = draft.role;
 	if (draft.connect !== undefined) out.connect = draft.connect;
+	if (draft.id !== undefined) {
+		if (draft.id) out.id = draft.id;
+		else delete out.id;
+	}
 	if (draft.logDir !== undefined) out.logDir = draft.logDir;
 
 	const existingName = typeof out.name === "string" ? out.name : undefined;
