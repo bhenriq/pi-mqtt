@@ -231,12 +231,19 @@ A **room** is a named namespace plus one shared password: same name and password
 means you see each other, anything else and you do not. There are no per-machine
 accounts to create — hand someone the room password and they can join.
 
-The **worker id** is declared, not authenticated. The MQTT client id is derived from
-`<room>-<worker-id>`, so the broker allows only one live session per id: a second
-session claims it, the older one is evicted, and it stops with
-`worker id "x" was taken over by another session`. Set `worker.workerId` only to
-choose that name; it defaults to the MQTT username if one is configured, else the
-hostname.
+The **worker id** is declared, not authenticated, and it is per *session*: several
+sessions can join from one host. On `/mqtt start` a worker asks for a name, defaulting
+to the pi session name (`pi --name billing`) or the hostname. If that name is already
+live, it is suffixed: `osiris`, `osiris-2`, `osiris-3`.
+
+An id given explicitly — `--pi-mqtt-id`, `PI_MQTT_WORKER_ID`, or `worker.workerId` in
+the file — is used verbatim with no question and no suffixing, so a collision is an
+error rather than a rename. That is the form to use for a long-lived worker you pin
+tasks to.
+
+Because the client id is `<room>-<worker-id>`, the broker permits one live session per
+id: if a pinned id is claimed twice, the older session is evicted and stops with
+`worker id "x" was taken over by another session`.
 
 Where the file is looked up: `./pi-mqtt.json` in the working directory, then
 `~/.pi/agent/pi-mqtt.json`, or `--pi-mqtt-config <path>`. See

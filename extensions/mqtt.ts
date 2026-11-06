@@ -81,6 +81,8 @@ interface Session {
 }
 
 let api: ExtensionAPI | undefined;
+/** Worker id chosen for this session at join time (not the file's default). */
+let sessionWorkerId: string | undefined;
 let session: Session | undefined;
 let runtime: Runtime | undefined;
 let currentCtx: ExtensionContext | undefined;
@@ -218,7 +220,11 @@ async function prepareSession(pi: ExtensionAPI, ctx: ExtensionContext): Promise<
 	);
 }
 
-async function connectRuntime(pi: ExtensionAPI, ctx: ExtensionContext): Promise<boolean> {
+async function connectRuntime(
+	pi: ExtensionAPI,
+	ctx: ExtensionContext,
+	interactive = false,
+): Promise<boolean> {
 	const current = session;
 	if (!current) {
 		ctx.ui.notify("pi-mqtt is not configured in this session: no role or broker. See SETUP.md.", "warning");
@@ -226,7 +232,17 @@ async function connectRuntime(pi: ExtensionAPI, ctx: ExtensionContext): Promise<
 	}
 	if (runtime) return true;
 
-	const { config, topics, log } = current;
+	const { topics, log } = current;
+	let config = current.config;
+	if (config.role === "worker") {
+		const chosen = await chooseWorkerId(pi, ctx, config, topics, interactive);
+		if (!chosen) {
+			ctx.ui.notify("pi-mqtt: join cancelled", "info");
+			return false;
+		}
+		sessionWorkerId = chosen;
+		config = { ...config, worker: { ...config.worker, workerId: chosen } };
+	}
 	const git = readGitInfo(ctx.cwd);
 	const model = describeModel(ctx);
 	const identity: PresenceIdentity = {
@@ -336,6 +352,7 @@ async function disconnectRuntime(): Promise<void> {
 async function endSession(): Promise<void> {
 	await disconnectRuntime();
 	session = undefined;
+	sessionWorkerId = undefined;
 }
 
 /** Local state plus who else is on the broker, as far as this role can see. */
@@ -345,7 +362,7 @@ function statusText(): string {
 	const { config, topics } = session;
 	const lines = [
 		`role:    ${config.role}`,
-		`worker:  ${config.worker.workerId}`,
+		`worker:  ${runtime?.config.worker.workerId ?? config.worker.workerId}`,
 		`broker:  ${config.mqtt.url} (MQTT ${config.mqtt.protocolVersion})`,
 		`room:    ${config.mqtt.cluster}`,
 		`topics:  ${topics.base}`,
@@ -395,6 +412,73 @@ function statusText(): string {
 	}
 
 	return lines.join("\n");
+}
+
+function sanitizeId(value: string): string {
+	return value
+		.toLowerCase()
+		.replace(/[^a-z0-9_-]+/g, "-")
+		.replace(/^-+|-+$/g, "")
+		.slice(0, 48);
+}
+
+/**
+ * Pick the worker id for this session.
+ *
+ * An id set explicitly (flag, env, or `worker.workerId` in the file) is honoured as
+ * written. Otherwise the session name is offered as the default, and a live id is
+ * suffixed (-2, -3, …) rather than refused: several sessions may join from one host.
+ */
+async function chooseWorkerId(
+	pi: ExtensionAPI,
+	ctx: ExtensionContext,
+	config: AppConfig,
+	topics: Topics,
+	interactive: boolean,
+): Promise<string | undefined> {
+	const explicit = Boolean(pi.getFlag(FLAG_ID) ?? process.env.PI_MQTT_WORKER_ID);
+	const configured = config.worker.workerId;
+	const hostDerived = configured === hostname().toLowerCase().replace(/[^a-z0-9_-]+/g, "-").slice(0, 48);
+	const pinned = explicit || !hostDerived;
+
+	let base = sessionWorkerId ?? (pinned ? configured : undefined);
+	if (!base) {
+		const sessionName = sanitizeId(pi.getSessionName() ?? "");
+		if (interactive && ctx.hasUI) {
+			const answer = await ctx.ui.input(
+				"Name this session (worker id)",
+				sessionName || configured,
+			);
+			if (answer === undefined) return undefined;
+			base = sanitizeId(answer) || sessionName || configured;
+		} else {
+			base = sessionName || configured;
+		}
+	}
+	if (!base) base = configured;
+
+	const link = new MqttLink(config.mqtt, {
+		clientId: `pi-mqtt-probe-${Math.random().toString(36).slice(2, 8)}`,
+		log: () => {},
+	});
+	try {
+		await link.connect();
+	} catch {
+		return base; // let the real connect report the problem
+	}
+	let candidate = base;
+	try {
+		for (let suffix = 2; suffix <= 20; suffix += 1) {
+			if (pinned) break;
+			const existing = await probePresence(link, topics, candidate, 900);
+			const live = existing && existing.state !== "offline" && Date.now() - existing.updatedAt < config.worker.heartbeatMs * 3;
+			if (!live) break;
+			candidate = `${base}-${suffix}`;
+		}
+	} finally {
+		await link.close();
+	}
+	return candidate;
 }
 
 /** Why a tool or command cannot do its job right now. */
@@ -758,7 +842,7 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 			if (arg === "start") {
-				await connectRuntime(pi, ctx);
+				await connectRuntime(pi, ctx, true);
 				return;
 			}
 			if (arg === "stop") {
@@ -772,7 +856,7 @@ export default function (pi: ExtensionAPI) {
 			}
 			if (arg === "restart") {
 				await disconnectRuntime();
-				await connectRuntime(pi, ctx);
+				await connectRuntime(pi, ctx, true);
 				return;
 			}
 			if (arg) {

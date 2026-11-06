@@ -50,9 +50,10 @@ you cannot connect at all. It does *not* separate members — every session uses
 same MQTT user, so any member can read every task and result, publish as any worker
 id, and dispatch tasks. Two checks remain in the payload: a worker ignores tasks not
 addressed to its id, and the orchestrator ignores results whose `workerId` differs
-from the worker the task was pinned to. Uniqueness is enforced by the broker through
-the derived client id (`<room>-<worker-id>`): a second session claiming an id evicts
-the first, which then stops.
+from the worker the task was pinned to. Uniqueness is enforced three ways: the join prompt suffixes a name that is already
+live (`osiris-2`), an explicitly pinned id is never renamed, and the derived client id
+(`<room>-<worker-id>`) lets the broker evict a duplicate of a pinned id — with the
+evicted session stopping rather than reconnecting.
 
 Rooms with *different* passwords need either their own broker, or per-device
 credentials (mTLS with `use_identity_as_username`, or per-machine passwords) — the

@@ -252,7 +252,7 @@ export function loadConfig(options: LoadOptions): LoadResult {
 		tidy(options.workerId),
 		tidy(env.PI_MQTT_WORKER_ID),
 		tidy(file?.worker?.workerId),
-		role === "worker" ? username : undefined,
+		role === "worker" ? configuredUsername : undefined,
 	].find((candidate) => candidate !== undefined) ?? defaultWorkerId();
 	if (!isValidIdentifier(workerId)) {
 		return {
