@@ -50,7 +50,6 @@ interface DispatchDetails {
 	error?: string;
 }
 
-const STATUS_KEY = "mqtt";
 const LOG_LIMIT = 100;
 const DIGEST_COALESCE_MS = 3_000;
 /** How long dispatch_task blocks waiting for the worker by default. */
@@ -213,7 +212,6 @@ async function prepareSession(pi: ExtensionAPI, ctx: ExtensionContext): Promise<
 		await connectRuntime(pi, ctx);
 		return;
 	}
-	refreshStatus();
 	ctx.ui.notify(
 		`pi-mqtt configured as ${config.role} "${config.worker.workerId}" — run /mqtt start to connect`,
 		"info",
@@ -299,7 +297,6 @@ async function connectRuntime(pi: ExtensionAPI, ctx: ExtensionContext): Promise<
 	}
 
 	runtime = connected;
-	refreshStatus();
 	ctx.ui.notify(`pi-mqtt ${config.role} "${config.worker.workerId}" connected to ${topics.base}`, "info");
 	return true;
 }
@@ -317,14 +314,12 @@ async function disconnectRuntime(): Promise<void> {
 		const keep = api.getActiveTools().filter((name) => !ORCHESTRATOR_TOOLS.includes(name));
 		api.setActiveTools(keep);
 	}
-	refreshStatus();
 }
 
 /** Session end: disconnect (gracefully) and forget the config. */
 async function endSession(): Promise<void> {
 	await disconnectRuntime();
 	session = undefined;
-	refreshStatus();
 }
 
 /** Local state plus who else is on the broker, as far as this role can see. */
@@ -383,38 +378,6 @@ function statusText(): string {
 	}
 
 	return lines.join("\n");
-}
-
-/**
- * Footer indicator: off, on, or on-and-busy. Kept to a couple of glyphs because the
- * footer is shared with the branch, model and every other extension.
- */
-function refreshStatus(): void {
-	const ctx = currentCtx;
-	if (!ctx) return;
-	const theme = ctx.ui.theme;
-	const tint = (color: Parameters<typeof theme.fg>[0], text: string) => {
-		try {
-			return theme.fg(color, text);
-		} catch {
-			return text;
-		}
-	};
-
-	if (!session) {
-		ctx.ui.setStatus(STATUS_KEY, undefined);
-		return;
-	}
-	if (!runtime) {
-		ctx.ui.setStatus(STATUS_KEY, tint("muted", "○ mqtt"));
-		return;
-	}
-	const busy =
-		runtime.presence?.state === "busy" ||
-		(runtime.orchestrator?.outstanding().some((record) => record.state === "running") ?? false);
-	const glyph = busy ? "◐" : "●";
-	const label = session.config.role === "worker" ? `${glyph} mqtt ${session.config.worker.workerId}` : `${glyph} mqtt`;
-	ctx.ui.setStatus(STATUS_KEY, tint(busy ? "warning" : "success", label));
 }
 
 /** Why a tool or command cannot do its job right now. */
@@ -815,14 +778,6 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_shutdown", async () => {
 		await endSession();
 		currentCtx = undefined;
-	});
-
-	pi.on("agent_start", async () => {
-		refreshStatus();
-	});
-
-	pi.on("agent_settled", async () => {
-		refreshStatus();
 	});
 
 	pi.on("model_select", async (_event, ctx) => {
