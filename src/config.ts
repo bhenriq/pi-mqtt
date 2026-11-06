@@ -13,6 +13,8 @@ import { isValidIdentifier, type Role } from "./protocol.ts";
 
 export interface MqttConfig {
 	url: string;
+	/** Shared cluster secret. When set, it is used as the password with one shared username. */
+	token?: string;
 	username?: string;
 	password?: string;
 	cluster: string;
@@ -69,6 +71,9 @@ interface FileShape {
 	/** Role can live in the file, so a fresh install needs no flags. */
 	role?: string;
 	connect?: string;
+	/** Room name and its shared password: the vocabulary people actually use. */
+	room?: string;
+	roomPassword?: string;
 	mqtt?: Partial<MqttConfig>;
 	worker?: Partial<WorkerConfig>;
 	logDir?: string;
@@ -158,8 +163,11 @@ export function envOverrideFor(field: string): string | undefined {
 		connect: "PI_MQTT_CONNECT",
 		url: "PI_MQTT_URL",
 		cluster: "PI_MQTT_CLUSTER",
+		room: "PI_MQTT_ROOM",
+		roomPassword: "PI_MQTT_ROOM_PASSWORD",
 		username: "PI_MQTT_USERNAME",
 		password: "PI_MQTT_PASSWORD",
+		token: "PI_MQTT_TOKEN",
 		workerId: "PI_MQTT_WORKER_ID",
 		caFile: "PI_MQTT_CA_FILE",
 	};
@@ -217,7 +225,10 @@ export function loadConfig(options: LoadOptions): LoadResult {
 	const urlError = validateBrokerUrl(url);
 	if (urlError) return { ok: false, reason: urlError };
 
-	const cluster = tidy(env.PI_MQTT_CLUSTER) ?? tidy(file?.mqtt?.cluster) ?? "dev";
+	// A room is just a named namespace plus one shared password. `cluster`/`token`
+	// remain accepted so machines configured before the rename keep working.
+	const cluster =
+		tidy(env.PI_MQTT_ROOM) ?? tidy(file?.room) ?? tidy(env.PI_MQTT_CLUSTER) ?? tidy(file?.mqtt?.cluster) ?? "dev";
 	if (!isValidIdentifier(cluster)) {
 		return {
 			ok: false,
@@ -228,7 +239,15 @@ export function loadConfig(options: LoadOptions): LoadResult {
 	// On a worker the MQTT username *is* the worker id: the broker's ACLs key on it.
 	// Falling back to it prevents the classic mismatch where a session announces one
 	// id and authenticates as another, and then silently cannot read its own tasks.
-	const username = tidy(env.PI_MQTT_USERNAME) ?? tidy(file?.mqtt?.username);
+	// A single shared secret replaces per-machine passwords: one username
+	// ("cluster" unless configured), one token. Declared ids stay a protocol concern.
+	const token =
+		tidy(env.PI_MQTT_ROOM_PASSWORD) ??
+		tidy(file?.roomPassword) ??
+		tidy(env.PI_MQTT_TOKEN) ??
+		tidy(file?.mqtt?.token);
+	const configuredUsername = tidy(env.PI_MQTT_USERNAME) ?? tidy(file?.mqtt?.username);
+	const username = token ? (configuredUsername ?? "cluster") : configuredUsername;
 	const workerId = [
 		tidy(options.workerId),
 		tidy(env.PI_MQTT_WORKER_ID),
@@ -261,7 +280,8 @@ export function loadConfig(options: LoadOptions): LoadResult {
 				// Environment wins; the file is a fallback for a machine you configure
 				// once. Keep such a file out of git (pi-mqtt.json is gitignored here).
 				username,
-				password: tidy(env.PI_MQTT_PASSWORD) ?? tidy(file?.mqtt?.password),
+				token,
+				password: token ?? tidy(env.PI_MQTT_PASSWORD) ?? tidy(file?.mqtt?.password),
 				cluster,
 				protocolVersion: rawVersion,
 				keepaliveSec: file?.mqtt?.keepaliveSec ?? 15,

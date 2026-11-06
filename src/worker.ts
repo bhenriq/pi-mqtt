@@ -93,6 +93,12 @@ export class Worker {
 		const { log, config } = this.deps;
 		this.taskLog({ direction: "in", taskId: task.taskId, kind: "task", prompt: task.prompt });
 
+		// A shared secret lets any member publish here; only take tasks addressed to us.
+		if (task.to !== this.deps.config.worker.workerId) {
+			log("warn", `ignoring task ${task.taskId} addressed to ${task.to}`);
+			return;
+		}
+
 		if (this.seen.has(task.taskId)) {
 			// QoS 1 may redeliver; the first delivery owns this task id.
 			log("info", `duplicate task ${task.taskId} ignored`);

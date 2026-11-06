@@ -14,12 +14,17 @@ import { envOverrideFor, type RawConfig } from "./config.ts";
 
 export interface Draft {
 	role?: string;
+	room?: string;
+	roomPassword?: string;
 	connect?: string;
 	mqtt: {
 		url?: string;
 		cluster?: string;
+		room?: string;
+		roomPassword?: string;
 		username?: string;
 		password?: string;
+		token?: string;
 		caFile?: string;
 		keepaliveSec?: number;
 		reconnectMs?: number;
@@ -179,9 +184,8 @@ export async function runConfigMenu(deps: MenuDeps): Promise<void> {
 		const items = [
 			`role          ${show(draft.role)}${envNote("role")}`,
 			`broker        ${show(draft.mqtt.url)}${envNote("url")}`,
-			`cluster       ${show(draft.mqtt.cluster)}${envNote("cluster")}`,
-			`username      ${show(draft.mqtt.username)}${envNote("username")}`,
-			`password      ${show(draft.mqtt.password, true)}${envNote("password")}`,
+			`room          ${show(draft.room ?? draft.mqtt.cluster)}${envNote("room")}`,
+			`room password ${show(draft.roomPassword ?? draft.mqtt.token ?? draft.mqtt.password, true)}${envNote("roomPassword")}`,
 			`connect       ${show(draft.connect)}${envNote("connect")}`,
 			`worker id     ${show(draft.worker.workerId ?? draft.mqtt.username)} (from username)`,
 			"──────────────────────────────",
@@ -223,45 +227,29 @@ export async function runConfigMenu(deps: MenuDeps): Promise<void> {
 			continue;
 		}
 
-		if (choice.startsWith("cluster")) {
-			if (locked("cluster")) {
-				ctx.ui.notify("cluster is set by PI_MQTT_CLUSTER; change the environment instead", "warning");
-				continue;
-			}
-			const value = await askText(ctx, "cluster id", draft.mqtt.cluster);
-			if (value === undefined) continue;
-			if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(value)) {
-				ctx.ui.notify("cluster id: letters, digits, _ or -, starting with a letter or digit", "warning");
-				continue;
-			}
-			draft.mqtt.cluster = value;
-			continue;
-		}
-
-		if (choice.startsWith("username")) {
-			if (locked("username")) {
-				ctx.ui.notify("username is set by PI_MQTT_USERNAME; change the environment instead", "warning");
-				continue;
-			}
-			const value = await askText(ctx, "MQTT username (= worker id on a worker)", draft.mqtt.username);
-			if (value === undefined) continue;
-			draft.mqtt.username = value;
-			if (draft.role === "worker") draft.worker.workerId = value;
-			continue;
-		}
-
-		if (choice.startsWith("password")) {
-			if (locked("password")) {
-				ctx.ui.notify("password is set by PI_MQTT_PASSWORD; change the environment instead", "warning");
-				continue;
-			}
-			const value = await promptSecret(ctx, "MQTT password");
+		if (choice.startsWith("room ") && choice.includes("password")) {
+			const value = await promptSecret(ctx, "room password (shared with everyone in the room)");
 			if (value === undefined) continue;
 			if (value.length === 0) {
-				ctx.ui.notify("empty password ignored", "warning");
+				ctx.ui.notify("empty room password ignored", "warning");
 				continue;
 			}
-			draft.mqtt.password = value;
+			draft.roomPassword = value;
+			continue;
+		}
+
+		if (choice.startsWith("room")) {
+			if (locked("room")) {
+				ctx.ui.notify("room is set by PI_MQTT_ROOM; change the environment instead", "warning");
+				continue;
+			}
+			const value = await askText(ctx, "room name", draft.room ?? draft.mqtt.cluster);
+			if (value === undefined) continue;
+			if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(value)) {
+				ctx.ui.notify("room name: letters, digits, _ or -, starting with a letter or digit", "warning");
+				continue;
+			}
+			draft.room = value;
 			continue;
 		}
 
@@ -308,9 +296,8 @@ export async function runConfigMenu(deps: MenuDeps): Promise<void> {
 					`file:     ${path} (${deps.pathOrigin})`,
 					`role:     ${show(draft.role)}${overrideNote("role")}`,
 					`broker:   ${show(draft.mqtt.url)}${overrideNote("url")}`,
-					`cluster:  ${show(draft.mqtt.cluster)}${overrideNote("cluster")}`,
-					`username: ${show(draft.mqtt.username)}${overrideNote("username")}`,
-					`password: ${show(draft.mqtt.password, true)}${overrideNote("password")}`,
+					`room:     ${show(draft.room ?? draft.mqtt.cluster)}${overrideNote("room")}`,
+					`roomPassword: ${show(draft.roomPassword ?? draft.mqtt.token ?? draft.mqtt.password, true)}${overrideNote("roomPassword")}`,
 					`connect:  ${show(draft.connect)}${overrideNote("connect")}`,
 					`worker:   ${show(draft.worker.workerId ?? draft.mqtt.username)}`,
 					`caFile:   ${show(draft.mqtt.caFile)}${overrideNote("caFile")}`,

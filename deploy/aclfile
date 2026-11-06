@@ -8,6 +8,12 @@
 # presence, acks, and results. A compromised worker laptop cannot dispatch tasks
 # to other workers, cannot read their traffic, and cannot forge their results.
 
+# Shared cluster secret: one credential for the whole cluster, no per-machine users.
+# It is a capability, not an identity: the broker cannot tell these sessions apart,
+# so isolation between machines no longer exists for them.
+user cluster
+topic readwrite pi/v1/#
+
 user orch
 topic write pi/v1/+/workers/+/ctl
 topic read pi/v1/+/workers/+/presence

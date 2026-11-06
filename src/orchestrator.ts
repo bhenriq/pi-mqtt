@@ -126,6 +126,15 @@ export class Orchestrator {
 				}
 				const record = this.tasks.get(payload.taskId);
 				if (!record) return;
+				// With a shared cluster secret the broker can no longer tell sessions
+				// apart, so the only remaining authenticity check is in the payload.
+				if (payload.workerId !== record.task.to) {
+					this.options.log(
+						"warn",
+						`ignoring result for ${payload.taskId} from ${payload.workerId}: it was pinned to ${record.task.to}`,
+					);
+					return;
+				}
 				this.finish(record, payload);
 			}),
 		);

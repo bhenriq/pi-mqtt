@@ -51,6 +51,9 @@ export class MqttLink {
 	private readonly trackedStreams = new WeakSet<object>();
 	/** Called after every successful (re)connect, including the first. */
 	onReconnect?: () => void;
+	/** Called when the broker evicted us because another session took the client id. */
+	onTakenOver?: () => void;
+	private takenOver = false;
 
 	/** Most recent abnormal close, for /mqtt status. */
 	get lastClose(): CloseInfo | undefined {
@@ -125,6 +128,15 @@ export class MqttLink {
 		client.on("disconnect", (packet) => {
 			const reasonCode = (packet as { reasonCode?: number } | undefined)?.reasonCode;
 			this.closeInfo = { at: Date.now(), source: "mqtt", code: reasonCode, reason: "broker DISCONNECT" };
+			// 0x8E "Session taken over": the deterministic client id means another
+			// session claimed this id. Reconnecting would evict it and start a fight,
+			// so stop and let the newcomer own the id.
+			if (reasonCode === 142 && !this.takenOver) {
+				this.takenOver = true;
+				options.log("warn", `client id taken over by another session; not reconnecting`);
+				this.onTakenOver?.();
+				client.end(true);
+			}
 		});
 
 		client.on("error", (error) => {

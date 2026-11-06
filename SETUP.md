@@ -3,7 +3,7 @@
 For a first run: install the extension, write one config file, start talking.
 
 You need **pi** installed and a **broker** to talk through. Either use a broker
-someone gave you (a URL plus a username/password) or run one yourself — see
+someone gave you (a URL plus the room name and room password) or run one yourself — see
 [deploy/README.md](./deploy/README.md) or the [local broker](#local-only-setup)
 section at the end.
 
@@ -54,22 +54,21 @@ environment variable.
 ```json
 {
   "role": "worker",
+  "room": "dev",
+  "roomPassword": "<the room password>",
   "mqtt": {
-    "url": "wss://broker-production-0bfd.up.railway.app",
-    "cluster": "dev",
-    "username": "worker-1",
-    "password": "<the password for worker-1>"
+    "url": "wss://broker-production-0bfd.up.railway.app"
   }
 }
 ```
 
 ```bash
-chmod 600 ~/.pi/agent/pi-mqtt.json    # it holds a password
+chmod 600 ~/.pi/agent/pi-mqtt.json    # it holds the room password
 ```
 
 Prefer not to hand-edit? `/mqtt config` in a session opens a menu that writes this
-file for you: role, broker, cluster, username, password (masked), connect mode, worker
-id, plus a **Test connection** action and an advanced submenu. It reconnects on save.
+file for you: role, broker, room name, room password (masked), connect mode, worker id,
+plus a **Test connection** action and an advanced submenu. It reconnects on save.
 
 ### An orchestrator (the session you type into)
 
@@ -78,30 +77,25 @@ Same file, two values differ:
 ```json
 {
   "role": "orchestrator",
+  "room": "dev",
+  "roomPassword": "<the room password>",
   "mqtt": {
-    "url": "wss://broker-production-0bfd.up.railway.app",
-    "cluster": "dev",
-    "username": "orch",
-    "password": "<the orchestrator password>"
+    "url": "wss://broker-production-0bfd.up.railway.app"
   }
 }
 ```
 
-### The one rule that matters
+### Rooms
 
-**The MQTT username is the worker id.** The broker's ACLs grant access with the
-username in the topic path, so a session authenticating as `worker-1` may only
-read `workers/worker-1/…`. The extension defaults `workerId` to the username for
-exactly this reason — if you set them to different values, that session will
-publish presence and never receive a task.
+A room is a named namespace plus one shared password. Everyone in the room sees everyone
+else; a different room name or a different password means a different room and no
+visibility. There are no per-machine accounts to create: hand out the room password and
+another session can join.
 
-So: to use the id `worker-7`, the broker must have a `worker-7` user. Ask the
-broker's operator to add one, or add it yourself if it is yours:
-
-```bash
-railway variables --set "PI_MQTT_USERS=orch:<pw>,worker-1:<pw>,worker-7:<newpw>" --service broker
-railway up -d -y     # from deploy/
-```
+**The worker id is declared, not authenticated.** The extension keeps it unique in
+practice: the MQTT client id is derived from `<room>-<worker-id>`, so if a second session
+claims an id that is already live, the broker evicts the older one and that session stops
+with `worker id "x" was taken over by another session`.
 
 ### Why these values
 
@@ -109,10 +103,10 @@ railway up -d -y     # from deploy/
 |---|---|
 | `role` | `worker` or `orchestrator`. Without it (here, in `PI_MQTT_ROLE`, or via `--pi-mqtt-role`) the extension stays inert |
 | `mqtt.url` | The scheme picks the transport: `wss://` (TLS WebSocket, usual for a hosted broker), `mqtts://` (TLS on a raw port), `mqtt://`/`ws://` (plain, local only) |
-| `mqtt.cluster` | Topic prefix. Everyone who should see each other must share it |
-| `mqtt.username` / `mqtt.password` | Issued by the broker operator. On a worker the username must equal the worker id |
+| `room` | The room name — also the topic prefix. Everyone who should see each other must share it |
+| `roomPassword` | The room's shared password. Anyone holding it can join the room |
 | `connect` | `"manual"` (default) connects only when you run `/mqtt start`; `"auto"` connects at session start |
-| `worker.workerId` | Optional. Defaults to the username; set it only if your broker does not tie the two together |
+| `worker.workerId` | Optional. Defaults to the username (or the hostname when there is none) |
 
 ### Where the file is read from
 
@@ -146,7 +140,7 @@ pi --pi-mqtt-start
 # or put "connect": "auto" in pi-mqtt.json
 ```
 
-In the TUI, `/mqtt status` reports the role, broker, cluster, `state: connected`, and
+In the TUI, `/mqtt status` reports the role, broker, room, `state: connected`, and
 how many workers are online. From an orchestrator, `/workers` prints the full table. Check from the orchestrator too — `rpi5`-style ids
 appear in the worker list.
 
@@ -197,7 +191,7 @@ worker is idle), `timeoutMs`, `maxCostUsd`, `repo: { baseSha | baseRef, branch }
 | `dispatch failed: worker "x" is busy with …` | One run at a time per worker. Use `ifBusy: "wait"` or another worker |
 | Presence appears, but dispatched tasks fail with auth/model errors | The **worker** needs its own model credentials (`pi` → `/login`). The broker being reachable does not give it a model |
 | Task result says `busy with …` | A second task arrived while one ran; it was rejected rather than queued |
-| `/workers` empty on the orchestrator but the worker is running | Different cluster (`mqtt.cluster`), or the worker's username/id mismatch |
+| `/workers` empty on the orchestrator but the worker is running | Different room name or password, so they are in different namespaces |
 
 Permission problems on the broker side — a worker that cannot read its own tasks,
 or can read someone else's — are covered in
@@ -228,12 +222,13 @@ environment.
 
 - Only the TLS WebSocket endpoint is public; the plain listeners stay inside the
   container.
-- Every client needs a username/password, and ACLs keep a worker to its own
-  control topic, its own presence, and results it publishes.
-- A worker credential currently **can** publish a result for any task id, so a
-  compromised worker could answer a task pinned to a different worker. Validation
-  in the orchestrator or per-worker result topics are the fixes; until then, treat
-  worker machines as trusted.
+- Every client needs the room password. With one shared password the broker cannot
+  tell sessions apart, so any member can read every task and result, and can publish
+  as any worker id. The remaining checks are in the payload: a worker ignores tasks not
+  addressed to it, and the orchestrator ignores results whose `workerId` differs from
+  the worker the task was pinned to.
+- The orchestrator now rejects a result whose `workerId` does not match the pinned
+  worker, but with a shared password a hostile member can still claim the right id;
+  treat every machine holding the room password as trusted.
 - Keep `pi-mqtt.json` at mode `600` and out of any repository. On a worker the
-  file contains that machine's broker password, and the broker password is the
-  machine's whole identity.
+  file contains the room password, which is the whole cluster's access.

@@ -71,7 +71,7 @@ not also pass `--extension` — loading both would register every tool twice.
 
 Each call runs one process in the foreground, so Ctrl-C stops just that piece. Extra
 workers are more shells with distinct ids: `scripts/dev.sh worker -i worker-2`. Common
-flags: `-p 1884` for a different broker port, `-c ci` for a separate cluster,
+flags: `-p 1884` for a different broker port, `-c ci` for a separate room,
 `--dry-run` to see the command without running it. On a non-default port the broker's
 WebSocket listener moves to `PORT+7182`. `npm run dev:broker`, `dev:worker`, and
 `dev:orchestrator` are the same three commands.
@@ -113,7 +113,7 @@ npm run broker          # mosquitto on 127.0.0.1:1883, no auth
 node scripts/probe.mjs  # prints presence/ack/result traffic
 ```
 
-Two sessions in the same cluster:
+Two sessions in the same room:
 
 ```bash
 # worker
@@ -155,8 +155,8 @@ Commands: `/workers` (the peer table), `/tasks` (dispatched tasks), `/mqtt confi
 `/mqtt start` / `/mqtt stop` / `/mqtt restart` to connect and disconnect.
 
 `/mqtt config` edits `~/.pi/agent/pi-mqtt.json` (or the project file, or
-`--pi-mqtt-config`) without hand-editing JSON: role, broker, cluster, username,
-password (masked in the TUI), connect mode, worker id, and an advanced submenu. It
+`--pi-mqtt-config`) without hand-editing JSON: role, broker, room, room password
+(masked in the TUI), connect mode, worker id, and an advanced submenu. It
 validates as you type, can **test the connection** before saving, shows which values
 are overridden by an environment variable, writes atomically with mode 600, and
 reconnects on save. Repos stay a file-only setting.
@@ -184,21 +184,23 @@ land in `~/.pi/agent/pi-mqtt/tasks/<worker>.jsonl`.
 
 ## Public broker
 
-A broker is deployed on Railway with per-role ACLs:
+A broker is deployed on Railway and reachable as
 `wss://broker-production-0bfd.up.railway.app` (MQTT over TLS WebSocket, port 443).
-The MQTT username must equal the worker id. Clients:
+Join a room with its name and password:
 
 ```bash
 export PI_MQTT_URL=wss://broker-production-0bfd.up.railway.app
 
-PI_MQTT_USERNAME=orch PI_MQTT_PASSWORD=... \
-  pi --extension ./extensions/mqtt.ts --pi-mqtt-role orchestrator
+# orchestrator
+pi                                   # config: role orchestrator, room "dev"
+/mqtt start
 
-PI_MQTT_USERNAME=worker-1 PI_MQTT_PASSWORD=... \
+# worker
+PI_MQTT_ROOM=dev PI_MQTT_ROOM_PASSWORD=... \
   scripts/dev.sh worker -u "$PI_MQTT_URL" -i worker-1
 ```
 
-Setup, caveats, and how to verify the ACLs: [deploy/README.md](./deploy/README.md).
+Setup, caveats, and the broker's own credentials: [deploy/README.md](./deploy/README.md).
 
 ## Configuration
 
@@ -209,28 +211,32 @@ One file per machine, then no flags and no environment:
 ```json
 {
   "role": "worker",
+  "room": "dev",
+  "roomPassword": "<the room password>",
   "mqtt": {
-    "url": "wss://broker-production-0bfd.up.railway.app",
-    "cluster": "dev",
-    "username": "worker-1",
-    "password": "<from the broker's PI_MQTT_USERS>"
+    "url": "wss://broker-production-0bfd.up.railway.app"
   }
 }
 ```
 
-An orchestrator is the same file with `"role": "orchestrator"` and
-`"username": "orch"`.
+An orchestrator is the same file with `"role": "orchestrator"`.
 
 ```bash
-chmod 600 ~/.pi/agent/pi-mqtt.json   # it holds a password
-pi                                   # already a worker-1
-/mqtt                                # broker, cluster, role, online state, recent log
+chmod 600 ~/.pi/agent/pi-mqtt.json   # it holds the room password
+pi                                   # already a worker, in room "dev"
+/mqtt status                          # role, broker, room, state, peers
 ```
 
-`workerId` defaults to `mqtt.username`, because the broker's ACLs key on the
-username: a session that authenticates as `worker-1` must announce itself as
-`worker-1`, or it cannot read its own tasks. Set `worker.workerId` explicitly only
-if your broker's ACLs do not tie the two together.
+A **room** is a named namespace plus one shared password: same name and password
+means you see each other, anything else and you do not. There are no per-machine
+accounts to create — hand someone the room password and they can join.
+
+The **worker id** is declared, not authenticated. The MQTT client id is derived from
+`<room>-<worker-id>`, so the broker allows only one live session per id: a second
+session claims it, the older one is evicted, and it stops with
+`worker id "x" was taken over by another session`. Set `worker.workerId` only to
+choose that name; it defaults to the MQTT username if one is configured, else the
+hostname.
 
 Where the file is looked up: `./pi-mqtt.json` in the working directory, then
 `~/.pi/agent/pi-mqtt.json`, or `--pi-mqtt-config <path>`. See
@@ -244,8 +250,8 @@ CLI flag > environment > `pi-mqtt.json`.
 |---|---|---|
 | role | `--pi-mqtt-role` | `PI_MQTT_ROLE` |
 | broker url | — | `PI_MQTT_URL` |
-| cluster | — | `PI_MQTT_CLUSTER` |
-| credentials | — | `PI_MQTT_USERNAME`, `PI_MQTT_PASSWORD` |
+| room | — | `PI_MQTT_ROOM` |
+| room password | — | `PI_MQTT_ROOM_PASSWORD` |
 | worker id | `--pi-mqtt-id` | `PI_MQTT_WORKER_ID` |
 | config path | `--pi-mqtt-config` | — |
 | CA bundle | — | `PI_MQTT_CA_FILE` |
@@ -255,8 +261,9 @@ Environment wins over the file, so CI and one-off runs can override without
 editing it. A session with no role anywhere stays inert: no socket, no presence,
 no tools.
 
-Worker ids and cluster ids are `[A-Za-z0-9][A-Za-z0-9_-]{0,63}`; they end up in
-topic names.
+Worker ids and room names are `[A-Za-z0-9][A-Za-z0-9_-]{0,63}`; they end up in
+topic names. `cluster` and `token` are still accepted as the old names for `room`
+and `roomPassword`, so pre-existing files keep working.
 
 ### Transports
 
@@ -279,10 +286,10 @@ and a failed handshake closes the client instead of retrying forever.
 ## Protocol
 
 ```
-pi/v1/<cluster>/workers/<id>/presence   worker → all, retained, LWT on crash
-pi/v1/<cluster>/workers/<id>/ctl        orchestrator → worker (task | cancel)
-pi/v1/<cluster>/workers/<id>/ack        worker → orchestrator (task started)
-pi/v1/<cluster>/results/<taskId>        worker → orchestrator
+pi/v1/<room>/workers/<id>/presence   worker → all, retained, LWT on crash
+pi/v1/<room>/workers/<id>/ctl        orchestrator → worker (task | cancel)
+pi/v1/<room>/workers/<id>/ack        worker → orchestrator (task started)
+pi/v1/<room>/results/<taskId>        worker → orchestrator
 ```
 
 Presence is retained, so `list_workers` is a local map read rather than a network

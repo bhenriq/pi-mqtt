@@ -240,8 +240,15 @@ async function connectRuntime(pi: ExtensionAPI, ctx: ExtensionContext): Promise<
 	};
 
 	const isWorker = config.role === "worker";
+	// A deterministic client id makes the broker enforce "one session per worker id":
+	// a second session with the same id takes the connection over. Orchestrators keep
+	// a random suffix so two shells on one machine do not evict each other.
+	const clientId =
+		config.role === "worker"
+			? `pi-mqtt-${config.mqtt.cluster}-${config.worker.workerId}`
+			: `pi-mqtt-orchestrator-${config.worker.workerId}-${Math.random().toString(36).slice(2, 8)}`;
 	const link = new MqttLink(config.mqtt, {
-		clientId: `pi-mqtt-${config.role}-${config.worker.workerId}-${Math.random().toString(36).slice(2, 8)}`,
+		clientId,
 		...(isWorker ? { will: { topic: topics.presence(config.worker.workerId), payload: buildPresence(identity, "offline") } } : {}),
 		log,
 	});
@@ -289,6 +296,15 @@ async function connectRuntime(pi: ExtensionAPI, ctx: ExtensionContext): Promise<
 		const presence = new Presence(link, topics, identity, config.worker.heartbeatMs, log);
 		// Reconnect: re-announce immediately instead of waiting for the next heartbeat.
 		link.onReconnect = () => presence.republish();
+		// Deterministic client id + broker takeover: the older session yields instead of
+		// reconnecting and evicting the newcomer in a loop.
+		link.onTakenOver = () => {
+			void disconnectRuntime();
+			ctx.ui.notify(
+				`pi-mqtt: worker id "${config.worker.workerId}" was taken over by another session; this one stopped. Use a different --pi-mqtt-id.`,
+				"error",
+			);
+		};
 		presence.start();
 		connected.presence = presence;
 		const worker = new Worker(link, topics, { pi, ctx: () => currentCtx, config, presence, log });
@@ -331,7 +347,7 @@ function statusText(): string {
 		`role:    ${config.role}`,
 		`worker:  ${config.worker.workerId}`,
 		`broker:  ${config.mqtt.url} (MQTT ${config.mqtt.protocolVersion})`,
-		`cluster: ${config.mqtt.cluster}`,
+		`room:    ${config.mqtt.cluster}`,
 		`topics:  ${topics.base}`,
 	];
 
@@ -340,6 +356,7 @@ function statusText(): string {
 		return lines.join("\n");
 	}
 
+	lines.push(`auth:    ${config.mqtt.token ? "room password" : `user ${config.mqtt.username ?? "?"}`}`);
 	lines.push(`state:   connected (online: ${runtime.link.online})`);
 	const reconnects = runtime.link.reconnects;
 	if (reconnects > 0) {
@@ -392,10 +409,13 @@ function draftFromConfig(config: AppConfig | undefined): Draft {
 	if (!config) return draft;
 	draft.role = config.role;
 	draft.connect = config.connect;
+	draft.room = config.mqtt.cluster;
+	draft.roomPassword = config.mqtt.token;
 	draft.mqtt.url = config.mqtt.url;
 	draft.mqtt.cluster = config.mqtt.cluster;
 	draft.mqtt.username = config.mqtt.username;
 	draft.mqtt.password = config.mqtt.password;
+	draft.mqtt.token = config.mqtt.token;
 	draft.mqtt.caFile = config.mqtt.caFile;
 	draft.mqtt.keepaliveSec = config.mqtt.keepaliveSec;
 	draft.mqtt.reconnectMs = config.mqtt.reconnectMs;
@@ -413,6 +433,8 @@ function mergeDraft(raw: RawConfig, draft: Draft): RawConfig {
 	const merged: RawConfig = { ...raw };
 	if (draft.role !== undefined) merged.role = draft.role;
 	if (draft.connect !== undefined) merged.connect = draft.connect;
+	if (draft.room !== undefined) merged.room = draft.room;
+	if (draft.roomPassword !== undefined) merged.roomPassword = draft.roomPassword;
 	if (draft.logDir !== undefined) merged.logDir = draft.logDir;
 
 	const mqtt = { ...((raw.mqtt as Record<string, unknown> | undefined) ?? {}) };

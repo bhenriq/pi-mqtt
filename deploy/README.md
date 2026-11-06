@@ -1,6 +1,7 @@
 # Deploying the broker (Railway)
 
-Stock mosquitto with per-role ACLs. Only the auth source is dynamic.
+Stock mosquitto. One shared user (`cluster`) carries the room password; per-machine
+users from the earlier design still work while machines migrate.
 
 **Deployed:** project `hello-world` (workspace *Tribe Internal Apps*), service
 `broker`, environment `production`.
@@ -10,7 +11,7 @@ Stock mosquitto with per-role ACLs. Only the auth source is dynamic.
 | Public endpoint | `wss://broker-production-0bfd.up.railway.app` (port 443, path `/mqtt`) |
 | Container listeners | `1883` mqtt, `9001` websockets |
 | Volume | `broker-volume` mounted at `/mosquitto/data` |
-| Env | `PI_MQTT_USERS=orch:<pw>,worker-1:<pw>,...` |
+| Env | `PI_MQTT_USERS=orch:<pw>,worker-1:<pw>,cluster:<room-password>` |
 
 Redeploy after changing anything here:
 
@@ -22,39 +23,39 @@ railway logs --lines 40   # entrypoint prints "configured user: ..." per user
 
 ## Client wiring
 
-The MQTT **username must equal the worker id**: the ACL file grants access with
-`%u` in the topic path, so `worker-1` may only touch `workers/worker-1/...` and
-results. The orchestrator uses the `orch` user.
+Join a room: the broker credential is the shared `cluster` user, and the room name
+is the topic namespace.
 
 ```bash
 export PI_MQTT_URL=wss://broker-production-0bfd.up.railway.app
-export PI_MQTT_CLUSTER=dev
 
-# orchestrator
-PI_MQTT_USERNAME=orch PI_MQTT_PASSWORD=... pi --extension ./extensions/mqtt.ts --pi-mqtt-role orchestrator
+# first machine: create the room by simply using it
+PI_MQTT_ROOM=dev PI_MQTT_ROOM_PASSWORD=... \
+  pi --pi-mqtt-role orchestrator
 
-# worker
-PI_MQTT_USERNAME=worker-1 PI_MQTT_PASSWORD=... \
+# another machine joins with the same room name + password
+PI_MQTT_ROOM=dev PI_MQTT_ROOM_PASSWORD=... \
   scripts/dev.sh worker -u "$PI_MQTT_URL" -i worker-1
 ```
 
-The tidier setup is one file per machine, `~/.pi/agent/pi-mqtt.json`, holding
-`role`, `mqtt.url`, `mqtt.cluster`, `mqtt.username`, `mqtt.password` — then `pi`
-needs no flags at all. See [SETUP.md](../SETUP.md) or
-[Configuration](../README.md#configuration).
-Credentials are **not** in this repo.
+Or put it in `~/.pi/agent/pi-mqtt.json`:
 
-Verify the access control after any change to `aclfile`:
-
-```bash
-PI_MQTT_URL=wss://broker-production-0bfd.up.railway.app \
-PW_ORCH=... PW_WORKER_1=... PW_WORKER_2=... node scripts/acl-check.mjs
+```json
+{ "role": "worker", "room": "dev", "roomPassword": "...",
+  "mqtt": { "url": "wss://broker-production-0bfd.up.railway.app" } }
 ```
 
-That checks both directions: a worker cannot publish to another worker's control
-topic, cannot read another worker's presence, and cannot read results — while the
-orchestrator can. Read checks publish and look for delivery, because mosquitto can
-grant a SUBACK and still filter the messages.
+**What the shared password does and does not do.** It gates the broker: without it
+you cannot connect at all. It does *not* separate members — every session uses the
+same MQTT user, so any member can read every task and result, publish as any worker
+id, and dispatch tasks. Two checks remain in the payload: a worker ignores tasks not
+addressed to its id, and the orchestrator ignores results whose `workerId` differs
+from the worker the task was pinned to. Uniqueness is enforced by the broker through
+the derived client id (`<room>-<worker-id>`): a second session claiming an id evicts
+the first, which then stops.
+
+Rooms with *different* passwords need either their own broker, or per-device
+credentials as in the sections below.
 
 ## Two ways to reach it
 

@@ -1,10 +1,9 @@
 {
   "role": "worker",
+  "room": "dev",
+  "roomPassword": "REPLACE_WITH_ROOM_PASSWORD",
   "mqtt": {
     "url": "wss://broker-production-0bfd.up.railway.app",
-    "cluster": "dev",
-    "username": "worker-1",
-    "password": "REPLACE_WITH_BROKER_PASSWORD",
     "protocolVersion": 5,
     "keepaliveSec": 15,
     "reconnectMs": 2000,
