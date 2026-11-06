@@ -14,6 +14,8 @@ import { envOverrideFor, type RawConfig } from "./config.ts";
 
 export interface Draft {
 	role?: string;
+	/** Exact session id; empty means "derive it". */
+	id?: string;
 	room?: string;
 	roomPassword?: string;
 	connect?: string;
