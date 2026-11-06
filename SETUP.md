@@ -93,12 +93,11 @@ else; a different room name or a different password means a different room and n
 visibility. There are no per-machine accounts to create: hand out the room password and
 another session can join.
 
-**The session id is declared, not authenticated, and scoped to the session.** `worker.name`
-in the file is the machine's base; `/mqtt start` pre-fills the id with
-`<worker name>-<pi session name>` (`prudential-billing`) and you may type anything instead.
-Accepting the prefill yields a suffix if it is already live; a name you typed is refused
-rather than renamed. Pass `--pi-mqtt-id` (or `worker.workerId`) for an exact id that never
-prompts.
+**The session id is derived and scoped to the session.** `worker.name` is the machine's
+base, and the id is `<worker name>-<pi session name>` (`prudential-billing`), or the base
+alone when the pi session is unnamed. A second window of the same session becomes
+`prudential-billing-2`. Nothing prompts. Pass `--pi-mqtt-id` (or set `worker.workerId`) to
+state an exact id that is never suffixed — use it for workers you pin tasks to.
 
 If the same pinned id is claimed twice, the broker evicts the older session, which stops
 with `worker id "x" was taken over by another session`.

@@ -220,11 +220,7 @@ async function prepareSession(pi: ExtensionAPI, ctx: ExtensionContext): Promise<
 	);
 }
 
-async function connectRuntime(
-	pi: ExtensionAPI,
-	ctx: ExtensionContext,
-	interactive = false,
-): Promise<boolean> {
+async function connectRuntime(pi: ExtensionAPI, ctx: ExtensionContext): Promise<boolean> {
 	const current = session;
 	if (!current) {
 		ctx.ui.notify("pi-mqtt is not configured in this session: no role or broker. See SETUP.md.", "warning");
@@ -234,7 +230,7 @@ async function connectRuntime(
 
 	const { topics, log } = current;
 	let config = current.config;
-	const chosen = await chooseSessionId(pi, ctx, config, topics, interactive);
+	const chosen = await resolveSessionId(pi, ctx, config, topics);
 	if (!chosen) return false;
 	sessionWorkerId = chosen;
 	config = { ...config, worker: { ...config.worker, workerId: chosen } };
@@ -444,45 +440,34 @@ function sanitizeId(value: string): string {
  * suffixed (-2, -3, …) rather than refused: several sessions may join from one host.
  */
 /**
- * The session's identity in the room.
+ * The session's identity in the room: derived, never chosen.
  *
- * An explicit id (flag, env, or `worker.workerId`) is used verbatim. Otherwise the
- * join prompt is pre-filled with `<worker name>-<pi session name>` for a worker (the
- * pi session name alone for an orchestrator), and whatever is typed there is used
- * exactly. An accepted prefill gets a numeric suffix if it is already live; something
- * typed by hand does not, because renaming a deliberate choice is a surprise.
+ * A worker's id is `<worker name>-<pi session name>` (or just the base when the pi
+ * session is unnamed); an orchestrator's is the pi session name. An explicit id
+ * (--pi-mqtt-id, PI_MQTT_WORKER_ID, worker.workerId) is used verbatim and never
+ * suffixed, which is the way to pin a long-lived worker.
  */
-async function chooseSessionId(
+async function resolveSessionId(
 	pi: ExtensionAPI,
 	ctx: ExtensionContext,
 	config: AppConfig,
 	topics: Topics,
-	interactive: boolean,
 ): Promise<string | undefined> {
 	const explicit = sanitizeId(String(pi.getFlag(FLAG_ID) ?? process.env.PI_MQTT_WORKER_ID ?? ""));
-	if (explicit) return sessionWorkerId ?? explicit;
+	if (explicit) return explicit;
+	if (sessionWorkerId) return sessionWorkerId;
 
 	const sessionName = sanitizeId(pi.getSessionName() ?? "");
 	const base = sanitizeId(config.worker.name ?? "") || config.worker.workerId;
-	const prefill = config.role === "worker"
-		? sessionName && sessionName !== base
-			? `${base}-${sessionName}`
-			: base
-		: sessionName || base;
+	const derived =
+		config.role === "worker"
+			? sessionName && sessionName !== base
+				? `${base}-${sessionName}`
+				: base
+			: sessionName || base;
 
-	if (sessionWorkerId) return sessionWorkerId;
-
-	if (!interactive || !ctx.hasUI) {
-		return prefill;
-	}
-
-	const answer = await ctx.ui.input("Session id (press enter to use the default)", prefill);
-	if (answer === undefined) return undefined;
-	const typed = sanitizeId(answer);
-	const chosen = typed || prefill;
-	const edited = typed.length > 0 && typed !== prefill;
-
-	// Only an accepted prefill is renamed on collision.
+	// A derived id must be unique: the same worker name and session name twice (two
+	// windows of the same session) becomes -2, -3, ...
 	const link = new MqttLink(config.mqtt, {
 		clientId: `pi-mqtt-probe-${Math.random().toString(36).slice(2, 8)}`,
 		log: () => {},
@@ -490,23 +475,22 @@ async function chooseSessionId(
 	try {
 		await link.connect();
 	} catch {
-		return chosen;
+		return derived;
 	}
 	try {
 		const live = async (id: string) => {
 			const existing = await probePresence(link, topics, id, 900);
 			return Boolean(existing && existing.state !== "offline" && Date.now() - existing.updatedAt < config.worker.heartbeatMs * 3);
 		};
-		if (!(await live(chosen))) return chosen;
-		if (edited) {
-			ctx.ui.notify(`pi-mqtt: session "${chosen}" is already live; pick another id.`, "error");
-			return undefined;
-		}
+		if (!(await live(derived))) return derived;
 		for (let suffix = 2; suffix <= 20; suffix += 1) {
-			const candidate = `${chosen}-${suffix}`;
-			if (!(await live(candidate))) return candidate;
+			const candidate = `${derived}-${suffix}`;
+			if (!(await live(candidate))) {
+				ctx.ui.notify(`pi-mqtt: "${derived}" is live; joining as "${candidate}".`, "info");
+				return candidate;
+			}
 		}
-		ctx.ui.notify(`pi-mqtt: no free id near "${chosen}".`, "error");
+		ctx.ui.notify(`pi-mqtt: no free id near "${derived}".`, "error");
 		return undefined;
 	} finally {
 		await link.close();
@@ -881,7 +865,7 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 			if (arg === "start") {
-				await connectRuntime(pi, ctx, true);
+				await connectRuntime(pi, ctx);
 				return;
 			}
 			if (arg === "stop") {
@@ -895,7 +879,7 @@ export default function (pi: ExtensionAPI) {
 			}
 			if (arg === "restart") {
 				await disconnectRuntime();
-				await connectRuntime(pi, ctx, true);
+				await connectRuntime(pi, ctx);
 				return;
 			}
 			if (arg) {

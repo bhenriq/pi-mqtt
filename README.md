@@ -220,9 +220,10 @@ One file per machine, then no flags and no environment:
 }
 ```
 
-`worker.name` is the machine's stable base name; the join prompt is pre-filled with
-`<name>-<pi session name>` (`prudential-abcd`), so several sessions on one host are
-distinguishable without inventing names. Without it, the hostname is the base.
+`worker.name` is the machine's stable base name. A worker's session id is derived, never
+typed: `<worker name>-<pi session name>` (`prudential-abcd`), or just the base when the pi
+session is unnamed. Two windows of the same session become `prudential-abcd-2`. Without
+`worker.name`, the hostname is the base.
 
 An orchestrator is the same file with `"role": "orchestrator"`.
 
@@ -237,19 +238,13 @@ means you see each other, anything else and you do not. There are no per-machine
 accounts to create — hand someone the room password and they can join.
 
 The **worker id** is declared, not authenticated, and it is per *session*: several
-sessions can join from one host. `/mqtt start` asks for it, pre-filled with
-`<worker name>-<pi session name>`; what you type is used exactly, and pressing enter
-accepts the prefill. An accepted prefill that is already live gets a suffix
-(`prudential-abcd-2`); a name you typed yourself is refused instead of renamed
-(`session "x" is already live`). An orchestrator's prefill is the pi session name alone.
+sessions can join from one host, and nothing is asked: the id is
+`<worker name>-<pi session name>`, suffixed (`-2`) if that is already live. An
+orchestrator's id is the pi session name. `--pi-mqtt-id` (or `worker.workerId`) is the
+only way to state an exact id — it never prompts and never gets a suffix, which is what
+you want for a worker you pin tasks to.
 
-An id given explicitly — `--pi-mqtt-id`, `PI_MQTT_WORKER_ID`, or `worker.workerId` in
-the file — is used verbatim with no question and no suffixing, so a collision is an
-error rather than a rename. That is the form to use for a long-lived worker you pin
-tasks to.
-
-Orchestrators need a name for the same reason (it identifies them in the roster) and
-announce themselves on `pi/v1/<room>/orchestrators/<id>/presence`, so
+Orchestrators announce themselves on `pi/v1/<room>/orchestrators/<id>/presence`, so
 you can see who is coordinating: `/mqtt status` lists them and `/workers` prints a separate
 ORCHESTRATORS table. They are a different topic from workers by design, so nothing can
 dispatch a task to one. The id is the session name (`pi --name demo`), else the hostname.
