@@ -211,19 +211,20 @@ One file per machine, then no flags and no environment:
 ```json
 {
   "role": "worker",
-  "room": "dev",
-  "roomPassword": "<the room password>",
-  "worker": { "name": "prudential" },
-  "mqtt": {
-    "url": "wss://broker-production-0bfd.up.railway.app"
-  }
+  "name": "prudential",
+  "room": { "name": "dev", "password": "<the room password>" },
+  "broker": { "url": "wss://broker-production-0bfd.up.railway.app" }
 }
 ```
 
-`worker.name` is the machine's stable base name. A worker's session id is derived, never
+Four groups, one each: `role`/`name` (who this session is), `room` (which room and its
+password), `broker` (where it lives), and optional `worker` (behaviour such as
+`heartbeatMs`). Defaults are omitted, so a minimal file stays minimal.
+
+`name` is the machine's stable base name. A worker's session id is derived, never
 typed: `<worker name>-<pi session name>` (`prudential-abcd`), or just the base when the pi
 session is unnamed. Two windows of the same session become `prudential-abcd-2`. Without
-`worker.name`, the hostname is the base.
+`name`, the hostname is the base.
 
 An orchestrator is the same file with `"role": "orchestrator"`.
 

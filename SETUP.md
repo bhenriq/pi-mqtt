@@ -54,12 +54,9 @@ environment variable.
 ```json
 {
   "role": "worker",
-  "room": "dev",
-  "roomPassword": "<the room password>",
-  "worker": { "name": "prudential" },
-  "mqtt": {
-    "url": "wss://broker-production-0bfd.up.railway.app"
-  }
+  "name": "prudential",
+  "room": { "name": "dev", "password": "<the room password>" },
+  "broker": { "url": "wss://broker-production-0bfd.up.railway.app" }
 }
 ```
 
@@ -68,8 +65,9 @@ chmod 600 ~/.pi/agent/pi-mqtt.json    # it holds the room password
 ```
 
 Prefer not to hand-edit? `/mqtt config` in a session opens a menu that writes this
-file for you: role, broker, room name, room password (masked), connect mode, worker id,
-plus a **Test connection** action and an advanced submenu. It reconnects on save.
+file for you: role, name, broker, room name, room password (masked), connect mode, plus a
+**Test connection** action and an advanced submenu. It writes the current structure and
+reconnects on save.
 
 ### An orchestrator (the session you type into)
 
@@ -78,11 +76,9 @@ Same file, two values differ:
 ```json
 {
   "role": "orchestrator",
-  "room": "dev",
-  "roomPassword": "<the room password>",
-  "mqtt": {
-    "url": "wss://broker-production-0bfd.up.railway.app"
-  }
+  "name": "prudential",
+  "room": { "name": "dev", "password": "<the room password>" },
+  "broker": { "url": "wss://broker-production-0bfd.up.railway.app" }
 }
 ```
 
@@ -93,11 +89,11 @@ else; a different room name or a different password means a different room and n
 visibility. There are no per-machine accounts to create: hand out the room password and
 another session can join.
 
-**The session id is derived and scoped to the session.** `worker.name` is the machine's
-base, and the id is `<worker name>-<pi session name>` (`prudential-billing`), or the base
-alone when the pi session is unnamed. A second window of the same session becomes
-`prudential-billing-2`. Nothing prompts. Pass `--pi-mqtt-id` (or set `worker.workerId`) to
-state an exact id that is never suffixed — use it for workers you pin tasks to.
+**The session id is derived and scoped to the session.** `name` is the machine's base, and
+the id is `<name>-<pi session name>` (`prudential-billing`), or the base alone when the pi
+session is unnamed. A second window of the same session becomes `prudential-billing-2`.
+Nothing prompts. Set `id` in the file (or pass `--pi-mqtt-id`) to state an exact id that is
+never suffixed — use it for workers you pin tasks to.
 
 If the same pinned id is claimed twice, the broker evicts the older session, which stops
 with `worker id "x" was taken over by another session`.
@@ -107,11 +103,13 @@ with `worker id "x" was taken over by another session`.
 | Field | Notes |
 |---|---|
 | `role` | `worker` or `orchestrator`. Without it (here, in `PI_MQTT_ROLE`, or via `--pi-mqtt-role`) the extension stays inert |
-| `mqtt.url` | The scheme picks the transport: `wss://` (TLS WebSocket, usual for a hosted broker), `mqtts://` (TLS on a raw port), `mqtt://`/`ws://` (plain, local only) |
-| `room` | The room name — also the topic prefix. Everyone who should see each other must share it |
-| `roomPassword` | The room's shared password. Anyone holding it can join the room |
+| `name` | This machine's name: the base for the session id. Defaults to the hostname |
+| `id` | Optional exact session id. Never suffixed, never derived |
+| `broker.url` | The scheme picks the transport: `wss://` (TLS WebSocket, usual for a hosted broker), `mqtts://` (TLS on a raw port), `mqtt://`/`ws://` (plain, local only) |
+| `room.name` | The room — also the topic prefix. Everyone who should see each other must share it |
+| `room.password` | The room's shared password. Anyone holding it can join the room |
 | `connect` | `"manual"` (default) connects only when you run `/mqtt start`; `"auto"` connects at session start |
-| `worker.workerId` | Optional. Defaults to the username (or the hostname when there is none) |
+| `worker` | Optional behaviour: `heartbeatMs`, `taskExpirySec`, `allowModelOverride`, `repos` |
 
 ### Where the file is read from
 
@@ -190,7 +188,7 @@ worker is idle), `timeoutMs`, `maxCostUsd`, `repo: { baseSha | baseRef, branch }
 |---|---|
 | Nothing happens, no tools, no `/workers` | Not connected. Run `/mqtt start` (connecting is explicit; `--pi-mqtt-start` or `"connect": "auto"` connects at launch) |
 | Nothing happens, and `/mqtt` says "not configured" | No role. Add `"role"` to the config, or pass `--pi-mqtt-role` |
-| `pi-mqtt inactive: no broker url` | No `mqtt.url` in the file and no `PI_MQTT_URL` |
+| `pi-mqtt inactive: no broker url` | No `broker.url` in the file and no `PI_MQTT_URL` |
 | `pi-mqtt: cannot reach wss://…: self-signed certificate` | Broker uses a private CA: set `mqtt.caFile` to its PEM bundle |
 | `worker id "x" is already live on …` | Two sessions using one id. Stop the old one, use another `-i`/`workerId`, or `--pi-mqtt-force` to take over deliberately |
 | `dispatch failed: worker "x" is offline` | No live session with that id, or its heartbeat is older than 3× `heartbeatMs` |

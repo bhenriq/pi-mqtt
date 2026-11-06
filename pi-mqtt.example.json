@@ -1,19 +1,11 @@
 {
   "role": "worker",
-  "room": "dev",
-  "roomPassword": "REPLACE_WITH_ROOM_PASSWORD",
-  "mqtt": {
-    "url": "wss://broker-production-0bfd.up.railway.app",
-    "protocolVersion": 5,
-    "keepaliveSec": 15,
-    "reconnectMs": 2000,
-    "rejectUnauthorized": true
+  "name": "prudential",
+  "room": {
+    "name": "dev",
+    "password": "REPLACE_WITH_ROOM_PASSWORD"
   },
-  "worker": {
-    "name": "REPLACE_WITH_A_NAME",
-    "heartbeatMs": 30000,
-    "taskExpirySec": 900,
-    "repos": {},
-    "allowModelOverride": false
+  "broker": {
+    "url": "wss://broker-production-0bfd.up.railway.app"
   }
 }

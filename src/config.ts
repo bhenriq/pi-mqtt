@@ -69,16 +69,45 @@ function validateBrokerUrl(raw: string): string | undefined {
 	return undefined;
 }
 
+/**
+ * On disk:
+ *
+ *   {
+ *     "role": "worker",
+ *     "name": "tribe",                                  identity
+ *     "id": "tribe-billing",                            optional exact id
+ *     "room": { "name": "dev", "password": "..." },     membership
+ *     "broker": { "url": "wss://..." },                 transport
+ *     "worker": { "heartbeatMs": 30000 }                behaviour
+ *   }
+ *
+ * `room`/`broker` may be strings for short files, and the pre-room keys
+ * (`mqtt`, `roomPassword`, `worker.name`) are still read so older files work.
+ */
+interface RoomShape {
+	name?: string;
+	password?: string;
+}
+
+interface BrokerShape extends Partial<Omit<MqttConfig, "url" | "username" | "password" | "token">> {
+	url?: string;
+}
+
 interface FileShape {
-	/** Role can live in the file, so a fresh install needs no flags. */
 	role?: string;
 	connect?: string;
-	/** Room name and its shared password: the vocabulary people actually use. */
-	room?: string;
-	roomPassword?: string;
-	mqtt?: Partial<MqttConfig>;
+	/** This machine's name: base for worker ids. */
+	name?: string;
+	/** Exact session id. Wins over everything derived. */
+	id?: string;
+	room?: string | RoomShape;
+	broker?: string | BrokerShape;
 	worker?: Partial<WorkerConfig>;
 	logDir?: string;
+
+	/** Legacy keys, still honoured. */
+	roomPassword?: string;
+	mqtt?: Partial<MqttConfig>;
 }
 
 function readConfigFile(path: string): FileShape | undefined {
@@ -219,7 +248,9 @@ export function loadConfig(options: LoadOptions): LoadResult {
 			reason: 'no role selected (pass --pi-mqtt-role orchestrator|worker, set PI_MQTT_ROLE, or add "role" to pi-mqtt.json)',
 		};
 	}
-	const url = tidy(env.PI_MQTT_URL) ?? tidy(file?.mqtt?.url);
+	const room = typeof file?.room === "string" ? { name: tidy(file.room) } : file?.room;
+	const broker = typeof file?.broker === "string" ? { url: tidy(file.broker) } : file?.broker;
+	const url = tidy(env.PI_MQTT_URL) ?? tidy(broker?.url) ?? tidy(file?.mqtt?.url);
 	if (!url) {
 		return { ok: false, reason: "no broker url (set PI_MQTT_URL or mqtt.url in pi-mqtt.json)" };
 	}
@@ -230,7 +261,11 @@ export function loadConfig(options: LoadOptions): LoadResult {
 	// A room is just a named namespace plus one shared password. `cluster`/`token`
 	// remain accepted so machines configured before the rename keep working.
 	const cluster =
-		tidy(env.PI_MQTT_ROOM) ?? tidy(file?.room) ?? tidy(env.PI_MQTT_CLUSTER) ?? tidy(file?.mqtt?.cluster) ?? "dev";
+		tidy(env.PI_MQTT_ROOM) ??
+		tidy(room?.name) ??
+		tidy(env.PI_MQTT_CLUSTER) ??
+		tidy(file?.mqtt?.cluster) ??
+		"dev";
 	if (!isValidIdentifier(cluster)) {
 		return {
 			ok: false,
@@ -245,14 +280,17 @@ export function loadConfig(options: LoadOptions): LoadResult {
 	// ("cluster" unless configured), one token. Declared ids stay a protocol concern.
 	const token =
 		tidy(env.PI_MQTT_ROOM_PASSWORD) ??
+		tidy(room?.password) ??
 		tidy(file?.roomPassword) ??
 		tidy(env.PI_MQTT_TOKEN) ??
 		tidy(file?.mqtt?.token);
 	const configuredUsername = tidy(env.PI_MQTT_USERNAME) ?? tidy(file?.mqtt?.username);
 	const username = token ? (configuredUsername ?? "cluster") : configuredUsername;
+	const name = tidy(file?.name) ?? tidy(file?.worker?.name);
 	const workerId = [
 		tidy(options.workerId),
 		tidy(env.PI_MQTT_WORKER_ID),
+		tidy(file?.id),
 		tidy(file?.worker?.workerId),
 		role === "worker" ? configuredUsername : undefined,
 	].find((candidate) => candidate !== undefined) ?? defaultWorkerId();
@@ -268,7 +306,7 @@ export function loadConfig(options: LoadOptions): LoadResult {
 		return { ok: false, reason: `connect must be "manual" or "auto", got ${JSON.stringify(rawConnect)}` };
 	}
 
-	const rawVersion = file?.mqtt?.protocolVersion ?? 5;
+	const rawVersion = broker?.protocolVersion ?? file?.mqtt?.protocolVersion ?? 5;
 	if (rawVersion !== 4 && rawVersion !== 5) {
 		return { ok: false, reason: `mqtt.protocolVersion must be 4 or 5, got ${String(rawVersion)}` };
 	}
@@ -286,17 +324,17 @@ export function loadConfig(options: LoadOptions): LoadResult {
 				password: token ?? tidy(env.PI_MQTT_PASSWORD) ?? tidy(file?.mqtt?.password),
 				cluster,
 				protocolVersion: rawVersion,
-				keepaliveSec: file?.mqtt?.keepaliveSec ?? 15,
-				reconnectMs: file?.mqtt?.reconnectMs ?? 2000,
+				keepaliveSec: broker?.keepaliveSec ?? file?.mqtt?.keepaliveSec ?? 15,
+				reconnectMs: broker?.reconnectMs ?? file?.mqtt?.reconnectMs ?? 2000,
 				// Env overrides exist so a launcher can point at a TLS broker without
 				// writing a config file.
-				caFile: tidy(env.PI_MQTT_CA_FILE) ?? tidy(file?.mqtt?.caFile),
+				caFile: tidy(env.PI_MQTT_CA_FILE) ?? tidy(broker?.caFile) ?? tidy(file?.mqtt?.caFile),
 				rejectUnauthorized:
-					env.PI_MQTT_REJECT_UNAUTHORIZED === "0" ? false : (file?.mqtt?.rejectUnauthorized ?? true),
+					env.PI_MQTT_REJECT_UNAUTHORIZED === "0" ? false : (broker?.rejectUnauthorized ?? file?.mqtt?.rejectUnauthorized ?? true),
 			},
 			worker: {
 				workerId,
-				name: tidy(file?.worker?.name),
+				name,
 				repos: file?.worker?.repos ?? {},
 				defaultRepo: file?.worker?.defaultRepo,
 				allowModelOverride: file?.worker?.allowModelOverride ?? false,
