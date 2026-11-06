@@ -164,6 +164,9 @@ reconnects on save. Repos stay a file-only setting.
 Connecting is explicit: a configured session still opens no socket until `/mqtt start`,
 unless it was launched with `--pi-mqtt-start` or its config says `"connect": "auto"`.
 
+The footer carries a small indicator: `● mqtt` connected, `◐ mqtt` connected and busy,
+`○ mqtt` configured but disconnected, and nothing at all when pi-mqtt is not configured.
+
 Dropped connections are re-established automatically (2s), subscriptions are re-applied, and a
 worker re-announces its presence immediately instead of waiting for the next heartbeat.
 `/mqtt status` reports `drops: N (last <time>: <source> <code>)` once a connection has been lost,
