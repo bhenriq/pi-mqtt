@@ -91,6 +91,11 @@ export class Presence {
 		this.current = buildPresence(identity, "idle");
 	}
 
+	/** Current advertised state, so callers can tell a busy worker from an idle one. */
+	get state(): WorkerState {
+		return this.current.state;
+	}
+
 	start(): void {
 		void this.publish();
 		this.timer = setInterval(() => void this.publish(), this.heartbeatMs);

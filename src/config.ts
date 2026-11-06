@@ -6,9 +6,9 @@
  * that might get committed.
  */
 
-import { readFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
-import { isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { isValidIdentifier, type Role } from "./protocol.ts";
 
 export interface MqttConfig {
@@ -105,6 +105,68 @@ function defaultWorkerId(): string {
 		.replace(/^-+|-+$/g, "")
 		.slice(0, 48);
 	return cleaned || "worker";
+}
+
+export interface ConfigPathInfo {
+	path: string;
+	origin: "project" | "agent" | "explicit";
+	exists: boolean;
+}
+
+/** Where a write would land, and how that location was chosen. */
+export function resolveConfigPath(options: { explicit?: string; cwd: string }): ConfigPathInfo {
+	if (options.explicit) {
+		const path = isAbsolute(options.explicit) ? options.explicit : resolve(options.cwd, options.explicit);
+		return { path, origin: "explicit", exists: existsSync(path) };
+	}
+	const project = resolve(options.cwd, "pi-mqtt.json");
+	if (existsSync(project)) return { path: project, origin: "project", exists: true };
+	const agent = join(homedir(), ".pi", "agent", "pi-mqtt.json");
+	return { path: agent, origin: "agent", exists: existsSync(agent) };
+}
+
+export type RawConfig = Record<string, unknown>;
+
+export function readConfigObject(path: string): RawConfig {
+	if (!existsSync(path)) return {};
+	try {
+		const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
+		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+		return parsed as RawConfig;
+	} catch {
+		return {};
+	}
+}
+
+/** Atomic write with owner-only permissions: a half-written or world-readable config is a bug. */
+export function writeConfigObject(path: string, value: RawConfig): void {
+	mkdirSync(dirname(path), { recursive: true });
+	const temporary = `${path}.tmp.${process.pid}`;
+	writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
+	renameSync(temporary, path);
+	try {
+		chmodSync(path, 0o600);
+	} catch {
+		// Windows: mode bits are advisory.
+	}
+}
+
+/** Which environment variable, if any, outranks the file for this field. */
+export function envOverrideFor(field: string): string | undefined {
+	const map: Record<string, string> = {
+		role: "PI_MQTT_ROLE",
+		connect: "PI_MQTT_CONNECT",
+		url: "PI_MQTT_URL",
+		cluster: "PI_MQTT_CLUSTER",
+		username: "PI_MQTT_USERNAME",
+		password: "PI_MQTT_PASSWORD",
+		workerId: "PI_MQTT_WORKER_ID",
+		caFile: "PI_MQTT_CA_FILE",
+	};
+	const name = map[field];
+	if (!name) return undefined;
+	const value = process.env[name];
+	return value && value.trim().length > 0 ? name : undefined;
 }
 
 export interface LoadOptions {

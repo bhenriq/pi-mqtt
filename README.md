@@ -150,9 +150,16 @@ Orchestrator tools (active only in an orchestrator session):
 | `list_tasks` | Task states: queued, sent, running, done, timeout, cancelled, lost |
 | `cancel_task` | Cooperative abort; the worker reports partial output |
 
-Commands: `/workers` (the peer table), `/tasks` (dispatched tasks), and `/mqtt` —
-bare or `/mqtt status` for local state and counts, `/mqtt start` / `/mqtt stop` /
-`/mqtt restart` to connect and disconnect.
+Commands: `/workers` (the peer table), `/tasks` (dispatched tasks), `/mqtt config`
+(interactive editor) and `/mqtt` — bare or `/mqtt status` for local state and counts,
+`/mqtt start` / `/mqtt stop` / `/mqtt restart` to connect and disconnect.
+
+`/mqtt config` edits `~/.pi/agent/pi-mqtt.json` (or the project file, or
+`--pi-mqtt-config`) without hand-editing JSON: role, broker, cluster, username,
+password (masked in the TUI), connect mode, worker id, and an advanced submenu. It
+validates as you type, can **test the connection** before saving, shows which values
+are overridden by an environment variable, writes atomically with mode 600, and
+reconnects on save. Repos stay a file-only setting.
 
 Connecting is explicit: a configured session still opens no socket until `/mqtt start`,
 unless it was launched with `--pi-mqtt-start` or its config says `"connect": "auto"`.

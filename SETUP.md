@@ -67,6 +67,10 @@ environment variable.
 chmod 600 ~/.pi/agent/pi-mqtt.json    # it holds a password
 ```
 
+Prefer not to hand-edit? `/mqtt config` in a session opens a menu that writes this
+file for you: role, broker, cluster, username, password (masked), connect mode, worker
+id, plus a **Test connection** action and an advanced submenu. It reconnects on save.
+
 ### An orchestrator (the session you type into)
 
 Same file, two values differ:

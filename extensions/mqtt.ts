@@ -8,10 +8,20 @@
  * Nothing opens a socket at load time.
  */
 
-import { hostname } from "node:os";
+import { rmSync, writeFileSync } from "node:fs";
+import { hostname, tmpdir } from "node:os";
+import { join } from "node:path";
 import { Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { loadConfig, type AppConfig } from "../src/config.ts";
+import {
+	loadConfig,
+	readConfigObject,
+	resolveConfigPath,
+	writeConfigObject,
+	type AppConfig,
+	type RawConfig,
+} from "../src/config.ts";
+import { runConfigMenu, type Draft } from "../src/menu.ts";
 import { readGitInfo } from "../src/git.ts";
 import { MqttLink, type LogFn } from "../src/mqtt.ts";
 import { Orchestrator, type TaskRecord } from "../src/orchestrator.ts";
@@ -377,6 +387,96 @@ function inactiveReason(): string {
 	return inactiveReason();
 }
 
+function draftFromConfig(config: AppConfig | undefined): Draft {
+	const draft: Draft = { mqtt: {}, worker: {} };
+	if (!config) return draft;
+	draft.role = config.role;
+	draft.connect = config.connect;
+	draft.mqtt.url = config.mqtt.url;
+	draft.mqtt.cluster = config.mqtt.cluster;
+	draft.mqtt.username = config.mqtt.username;
+	draft.mqtt.password = config.mqtt.password;
+	draft.mqtt.caFile = config.mqtt.caFile;
+	draft.mqtt.keepaliveSec = config.mqtt.keepaliveSec;
+	draft.mqtt.reconnectMs = config.mqtt.reconnectMs;
+	draft.mqtt.protocolVersion = config.mqtt.protocolVersion;
+	draft.mqtt.rejectUnauthorized = config.mqtt.rejectUnauthorized;
+	draft.worker.workerId = config.worker.workerId;
+	draft.worker.heartbeatMs = config.worker.heartbeatMs;
+	draft.worker.taskExpirySec = config.worker.taskExpirySec;
+	draft.worker.allowModelOverride = config.worker.allowModelOverride;
+	draft.logDir = config.logDir;
+	return draft;
+}
+
+function mergeDraft(raw: RawConfig, draft: Draft): RawConfig {
+	const merged: RawConfig = { ...raw };
+	if (draft.role !== undefined) merged.role = draft.role;
+	if (draft.connect !== undefined) merged.connect = draft.connect;
+	if (draft.logDir !== undefined) merged.logDir = draft.logDir;
+
+	const mqtt = { ...((raw.mqtt as Record<string, unknown> | undefined) ?? {}) };
+	for (const [key, value] of Object.entries(draft.mqtt)) if (value !== undefined) mqtt[key] = value;
+	merged.mqtt = mqtt;
+
+	const worker = { ...((raw.worker as Record<string, unknown> | undefined) ?? {}) };
+	for (const [key, value] of Object.entries(draft.worker)) if (value !== undefined) worker[key] = value;
+	merged.worker = worker;
+	return merged;
+}
+
+function buildMenu(pi: ExtensionAPI, ctx: ExtensionContext) {
+	const explicit = pi.getFlag(FLAG_CONFIG) as string | undefined;
+	const info = resolveConfigPath({ ...(explicit ? { explicit } : {}), cwd: ctx.cwd });
+	const raw = readConfigObject(info.path);
+	const draft = draftFromConfig(session?.config);
+
+	return {
+		ctx,
+		path: info.path,
+		pathOrigin: info.origin,
+		draft,
+		raw,
+		log: (message: string) => session?.log("info", message),
+		busy: () =>
+			(runtime?.orchestrator?.outstanding() ?? []).some((record) => record.state === "running") ||
+			runtime?.presence?.state === "busy",
+		test: async (candidate: Draft): Promise<string | null> => {
+			const temporary = join(tmpdir(), `pi-mqtt-config-${process.pid}.json`);
+			try {
+				writeFileSync(temporary, JSON.stringify(mergeDraft(raw, candidate), null, 2), { mode: 0o600 });
+				const loaded = loadConfig({ configPath: temporary, cwd: ctx.cwd });
+				if (!loaded.ok) return loaded.reason;
+				const link = new MqttLink(loaded.config.mqtt, { clientId: `pi-mqtt-configtest-${Math.random().toString(36).slice(2, 8)}`, log: () => {} });
+				try {
+					await link.connect();
+				} catch (error) {
+					return (error as Error).message;
+				}
+				await link.close();
+				return null;
+			} finally {
+				try {
+					rmSync(temporary, { force: true });
+				} catch {
+					// best effort
+				}
+			}
+		},
+		save: async (candidate: Draft, current: RawConfig): Promise<string> => {
+			writeConfigObject(info.path, mergeDraft(current, candidate));
+			return `saved ${info.path} (${info.origin}); mode 600`;
+		},
+		apply: async () => {
+			const wasConnected = Boolean(runtime);
+			await disconnectRuntime();
+			session = undefined;
+			await prepareSession(pi, ctx);
+			if (wasConnected && session) await connectRuntime(pi, ctx);
+		},
+	};
+}
+
 export default function (pi: ExtensionAPI) {
 	pi.registerFlag(FLAG_ROLE, { description: "pi-mqtt role: orchestrator | worker", type: "string" });
 	pi.registerFlag(FLAG_ID, { description: "pi-mqtt worker id (defaults to hostname)", type: "string" });
@@ -626,6 +726,10 @@ export default function (pi: ExtensionAPI) {
 		handler: async (args, ctx) => {
 			const arg = args.trim().toLowerCase();
 
+			if (arg === "config") {
+				await runConfigMenu(buildMenu(pi, ctx));
+				return;
+			}
 			if (arg === "status") {
 				ctx.ui.notify(statusText(), "info");
 				return;
@@ -649,7 +753,7 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 			if (arg) {
-				ctx.ui.notify("usage: /mqtt [status|start|stop|restart]", "warning");
+				ctx.ui.notify("usage: /mqtt [status|config|start|stop|restart]", "warning");
 				return;
 			}
 
