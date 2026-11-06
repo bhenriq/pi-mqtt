@@ -309,6 +309,50 @@ export class Orchestrator {
 		return `${header}\n${rows.join("\n")}`;
 	}
 
+	/** Workers and orchestrators in one table, role as a column. */
+	combinedTable(): string {
+		const workers = this.entries();
+		const others = this.orchestratorEntries();
+		if (workers.length === 0 && others.length === 0) return `No sessions on ${this.topics.base} yet.`;
+
+		const header = [
+			["ID", 22],
+			["ROLE", 14],
+			["STATE", 10],
+			["REPO", 26],
+			["MODEL", 22],
+			["AGE", 5],
+			["CWD", 3],
+		]
+			.map(([label, width]) => String(label).padEnd(Number(width)))
+			.join("  ");
+
+		const workerRows = workers.map(({ presence, stale, ageMs }) =>
+			[
+				clip(presence.workerId, 22),
+				clip("worker", 14),
+				clip(stale ? `${presence.state}?` : presence.state, 10),
+				clip([presence.repo, presence.branch].filter(Boolean).join("@") || "-", 26),
+				clip(presence.model ?? "-", 22),
+				clip(formatAge(ageMs), 5),
+				presence.cwd,
+			].join("  "),
+		);
+		const orchestratorRows = others.map(({ presence, stale, ageMs }) =>
+			[
+				clip(presence.workerId, 22),
+				clip("orchestrator", 14),
+				clip(stale ? `${presence.state}?` : presence.state, 10),
+				clip([presence.repo, presence.branch].filter(Boolean).join("@") || "-", 26),
+				clip(presence.model ?? "-", 22),
+				clip(formatAge(ageMs), 5),
+				presence.cwd,
+			].join("  "),
+		);
+
+		return [header, ...workerRows, ...orchestratorRows].join("\n");
+	}
+
 	workerTable(): string {
 		const entries = this.entries();
 		if (entries.length === 0) return `No workers on ${this.topics.base} yet.`;

@@ -409,7 +409,7 @@ function statusText(): string {
 		lines.push(
 			`orchestrators: ${others.length === 0 ? "none in the room" : others.map((entry) => entry.presence.workerId).join(", ")}`,
 		);
-		lines.push(entries.length === 0 ? `No workers on ${topics.base} yet.` : "detail:  /workers for the full table");
+		lines.push("", orchestrator.combinedTable());
 	} else {
 		const presence = runtime.worker;
 		lines.push(presence ? `worker:  idle, listening for tasks` : "worker:  idle");
@@ -654,7 +654,7 @@ export default function (pi: ExtensionAPI) {
 				return { content: [{ type: "text", text: inactiveReason() }], details: undefined };
 			}
 			return {
-				content: [{ type: "text", text: current.orchestrator.workerTable() }],
+				content: [{ type: "text", text: current.orchestrator.combinedTable() }],
 				details: {
 					cluster: current.config.mqtt.cluster,
 					workers: current.orchestrator.entries().map((entry) => ({
@@ -853,13 +853,7 @@ export default function (pi: ExtensionAPI) {
 				ctx.ui.notify(inactiveReason(), "warning");
 				return;
 			}
-			ctx.ui.notify(
-				[
-					`WORKERS\n${runtime.orchestrator.workerTable()}`,
-					`ORCHESTRATORS\n${runtime.orchestrator.orchestratorTable()}`,
-				].join("\n\n"),
-				"info",
-			);
+			ctx.ui.notify(runtime.orchestrator.combinedTable(), "info");
 		},
 	});
 
