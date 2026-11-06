@@ -21,8 +21,7 @@
     "dev": "sh ./scripts/dev.sh",
     "dev:broker": "sh ./scripts/dev.sh broker",
     "dev:worker": "sh ./scripts/dev.sh worker",
-    "dev:orchestrator": "sh ./scripts/dev.sh orchestrator",
-    "acl-check": "node ./scripts/acl-check.mjs"
+    "dev:orchestrator": "sh ./scripts/dev.sh orchestrator"
   },
   "dependencies": {
     "mqtt": "^5.16.1"

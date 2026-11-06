@@ -1,27 +1,14 @@
-# Per-role access control.
+# One room password, one broker user.
 #
-# Users are named after the role they serve:
-#   orch          - the orchestrator session
-#   worker-<id>   - one worker laptop
+# The password gates the broker; it does not separate members. Every session uses
+# the `cluster` user, so any member can read every task and result, dispatch tasks,
+# and use any worker id. What remains is enforced in the payload by the extension:
+# a worker ignores tasks not addressed to it, and the orchestrator ignores results
+# whose workerId differs from the pinned worker.
 #
-# The point: a worker can read only its own control topic and write only its own
-# presence, acks, and results. A compromised worker laptop cannot dispatch tasks
-# to other workers, cannot read their traffic, and cannot forge their results.
+# Isolation between members would require one credential per device (mTLS with
+# use_identity_as_username, or per-machine passwords), which is the design this
+# replaced.
 
-# Shared cluster secret: one credential for the whole cluster, no per-machine users.
-# It is a capability, not an identity: the broker cannot tell these sessions apart,
-# so isolation between machines no longer exists for them.
 user cluster
 topic readwrite pi/v1/#
-
-user orch
-topic write pi/v1/+/workers/+/ctl
-topic read pi/v1/+/workers/+/presence
-topic read pi/v1/+/workers/+/ack
-topic read pi/v1/+/results/+
-
-# Patterns apply to every user, including orch and any worker.
-pattern read pi/v1/+/workers/%u/ctl
-pattern write pi/v1/+/workers/%u/presence
-pattern write pi/v1/+/workers/%u/ack
-pattern write pi/v1/+/results/+

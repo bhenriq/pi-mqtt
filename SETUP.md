@@ -218,7 +218,7 @@ environment.
 
 ---
 
-## Security notes for whoever runs the broker
+## Security notes for the room
 
 - Only the TLS WebSocket endpoint is public; the plain listeners stay inside the
   container.

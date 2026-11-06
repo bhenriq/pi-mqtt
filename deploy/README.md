@@ -1,7 +1,7 @@
 # Deploying the broker (Railway)
 
-Stock mosquitto. One shared user (`cluster`) carries the room password; per-machine
-users from the earlier design still work while machines migrate.
+Stock mosquitto with **one** shared user (`cluster`) that carries the room password.
+There are no per-machine accounts.
 
 **Deployed:** project `hello-world` (workspace *Tribe Internal Apps*), service
 `broker`, environment `production`.
@@ -11,14 +11,14 @@ users from the earlier design still work while machines migrate.
 | Public endpoint | `wss://broker-production-0bfd.up.railway.app` (port 443, path `/mqtt`) |
 | Container listeners | `1883` mqtt, `9001` websockets |
 | Volume | `broker-volume` mounted at `/mosquitto/data` |
-| Env | `PI_MQTT_USERS=orch:<pw>,worker-1:<pw>,cluster:<room-password>` |
+| Env | `PI_MQTT_USERS=cluster:<room-password>` |
 
 Redeploy after changing anything here:
 
 ```bash
 cd deploy
 railway up -d -y          # builds the Dockerfile and rolls the service
-railway logs --lines 40   # entrypoint prints "configured user: ..." per user
+railway logs --lines 40   # entrypoint prints "configured user: cluster"
 ```
 
 ## Client wiring
@@ -55,7 +55,16 @@ the derived client id (`<room>-<worker-id>`): a second session claiming an id ev
 the first, which then stops.
 
 Rooms with *different* passwords need either their own broker, or per-device
-credentials as in the sections below.
+credentials (mTLS with `use_identity_as_username`, or per-machine passwords) — the
+design this replaced.
+
+## Credentials
+
+There is exactly one: the `cluster` user whose password is the room password. Rotating
+it means editing `PI_MQTT_USERS` and redeploying, then updating `roomPassword` on each
+machine. The entrypoint rewrites `passwd` from the variable on every boot, so a removed
+credential takes effect immediately — a machine still holding the old password is
+refused with `Connection Refused: not authorised`.
 
 ## Two ways to reach it
 

@@ -200,7 +200,7 @@ PI_MQTT_ROOM=dev PI_MQTT_ROOM_PASSWORD=... \
   scripts/dev.sh worker -u "$PI_MQTT_URL" -i worker-1
 ```
 
-Setup, caveats, and the broker's own credentials: [deploy/README.md](./deploy/README.md).
+Setup, caveats, and the single broker credential: [deploy/README.md](./deploy/README.md).
 
 ## Configuration
 

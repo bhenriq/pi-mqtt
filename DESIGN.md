@@ -23,9 +23,11 @@ Config: broker credentials from env (`PI_MQTT_URL`, `PI_MQTT_USER`, `PI_MQTT_PAS
 ## Transport
 
 - Mosquitto on Railway, **MQTT 5**, public endpoint, TLS (`8883`, or TCP proxy with TLS).
-- **Auth per role**: `orch-<name>` and `worker-<id>` users, per-role ACLs so a compromised
-  worker cannot publish tasks or read other workers' traffic.
-- Topic prefix carries a cluster id, so separate experiments never collide.
+- **One room password**: a single broker user (`cluster`) carries the room's shared
+  secret. Rooms are a name plus that password; membership is the password. The
+  superseded per-role design (one user per machine, ACLs keyed on `%u`) is described
+  at the end of this document.
+- Topic prefix carries the room name, so separate rooms never collide.
 - **QoS 1** everywhere; dedupe by `taskId` (see failure policy).
 - **Message expiry** on tasks (default 15 min) so a laptop that wakes up 40 minutes later
   does not execute stale work.
@@ -162,8 +164,11 @@ decision your session makes — which only works because `/tasks` shows outstand
 Laptops are trusted, so workers keep full tools with no approval gate. Two habits retained
 because they're nearly free: workers launch with a minimal env (no cloud/API secrets in a
 session that runs broker-supplied prompts), and the repo URL comes from local config rather
-than presence. Broker access is TLS + per-role ACL; task payloads are treated as untrusted
-data by the protocol, not as instructions from the operator.
+than presence. Broker access is TLS plus the room password, which is a capability rather than an
+identity: any member can read every task and result. The payload therefore carries the
+two checks that remain — a worker ignores tasks not addressed to it, and the
+orchestrator ignores results whose `workerId` differs from the pinned worker. Task
+payloads are treated as untrusted data, not as instructions from the operator.
 
 ## Layout
 
@@ -191,4 +196,25 @@ auto-recovery beyond the no-ack case. Shared filesystem anything.
 2. Extension connects, presence heartbeat + LWT, `/workers` renders retained presence.
 3. `dispatch_task` → worker executes → result published → `get_result`, silent digest only.
 4. `notify: wake`, coalescing, `cancel`, `timeout`, `started`-ack redispatch, `/tasks`.
-5. Package + Railway deploy + per-role credentials.
+5. Package + Railway deploy + the room credential.
+
+## Superseded: per-machine credentials
+
+The first design gave every machine its own MQTT user, with ACLs keyed on `%u`
+(`workers/<id>/ctl` readable only by that user). It gave real isolation — a stolen
+worker credential could not read another worker's tasks or forge its results — and it
+cost an admin step per machine: edit `PI_MQTT_USERS`, redeploy, keep username equal to
+worker id.
+
+It was replaced by rooms because the admin step dominated the workflow. What the
+replacement gives up, deliberately:
+
+- the broker cannot distinguish members, so any member can read every task and result,
+  dispatch tasks, and publish as any worker id;
+- result authenticity rests on the payload (`workerId` compared to the pinned worker),
+  which a hostile member can satisfy by claiming the right id;
+- uniqueness moved to the broker via the derived client id `<room>-<worker-id>`, so a
+  second session evicts the first (the evicted one detects `0x8E` and stops).
+
+Returning to isolation means one credential per device again, most cheaply as client
+certificates with `use_identity_as_username` (the ACL `%u` rules keep working).
