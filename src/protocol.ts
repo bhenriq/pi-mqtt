@@ -85,6 +85,8 @@ export interface ResultMessage {
 export interface PresenceMessage {
 	v: number;
 	kind: "presence";
+	/** Workers can receive tasks; orchestrators only dispatch them. */
+	role?: "worker" | "orchestrator";
 	workerId: string;
 	host: string;
 	cwd: string;
@@ -114,10 +116,12 @@ export function topicsFor(cluster: string) {
 	return {
 		base,
 		presence: (workerId: string) => `${base}/workers/${workerId}/presence`,
+		orchestratorPresence: (id: string) => `${base}/orchestrators/${id}/presence`,
 		control: (workerId: string) => `${base}/workers/${workerId}/ctl`,
 		ack: (workerId: string) => `${base}/workers/${workerId}/ack`,
 		result: (taskId: string) => `${base}/results/${taskId}`,
 		presenceFilter: `${base}/workers/+/presence`,
+		orchestratorFilter: `${base}/orchestrators/+/presence`,
 		ackFilter: `${base}/workers/+/ack`,
 		resultFilter: `${base}/results/+`,
 	} as const;

@@ -241,8 +241,10 @@ the file — is used verbatim with no question and no suffixing, so a collision 
 error rather than a rename. That is the form to use for a long-lived worker you pin
 tasks to.
 
-`/mqtt status` reports your `session:` name (from `pi --name` or `/name`) next to the
-worker id, so a named session is identifiable without publishing presence.
+Orchestrators announce themselves too, on `pi/v1/<room>/orchestrators/<id>/presence`, so
+you can see who is coordinating: `/mqtt status` lists them and `/workers` prints a separate
+ORCHESTRATORS table. They are a different topic from workers by design, so nothing can
+dispatch a task to one. The id is the session name (`pi --name demo`), else the hostname.
 
 Because the client id is `<room>-<worker-id>`, the broker permits one live session per
 id: if a pinned id is claimed twice, the older session is evicted and stops with
@@ -297,6 +299,7 @@ and a failed handshake closes the client instead of retrying forever.
 
 ```
 pi/v1/<room>/workers/<id>/presence   worker → all, retained, LWT on crash
+pi/v1/<room>/orchestrators/<id>/presence   orchestrator → all, retained
 pi/v1/<room>/workers/<id>/ctl        orchestrator → worker (task | cancel)
 pi/v1/<room>/workers/<id>/ack        worker → orchestrator (task started)
 pi/v1/<room>/results/<taskId>        worker → orchestrator

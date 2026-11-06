@@ -307,9 +307,27 @@ async function connectRuntime(
 		});
 		orchestrator.start();
 		connected.orchestrator = orchestrator;
+		const sessionId = sanitizeId(pi.getSessionName() ?? "") || config.worker.workerId;
+		const presence = new Presence(
+			link,
+			topics.orchestratorPresence(sessionId),
+			{ ...identity, workerId: sessionId },
+			config.worker.heartbeatMs,
+			log,
+			86_400,
+			"orchestrator",
+		);
+		presence.start();
+		connected.presence = presence;
 		pi.setActiveTools([...new Set([...pi.getActiveTools(), ...ORCHESTRATOR_TOOLS])]);
 	} else {
-		const presence = new Presence(link, topics, identity, config.worker.heartbeatMs, log);
+		const presence = new Presence(
+			link,
+			topics.presence(config.worker.workerId),
+			identity,
+			config.worker.heartbeatMs,
+			log,
+		);
 		// Reconnect: re-announce immediately instead of waiting for the next heartbeat.
 		link.onReconnect = () => presence.republish();
 		// Deterministic client id + broker takeover: the older session yields instead of
@@ -401,11 +419,11 @@ function statusText(): string {
 			const queued = outstanding.length - running.length;
 			lines.push(`tasks:   ${outstanding.length} outstanding (${running.length} running, ${queued} queued)`);
 		}
+		const others = orchestrator.orchestratorEntries();
 		lines.push(
-			entries.length === 0
-				? `No workers on ${topics.base} yet.`
-				: "detail:  /workers for the full table",
+			`orchestrators: ${others.length === 0 ? "none in the room" : others.map((entry) => entry.presence.workerId).join(", ")}`,
 		);
+		lines.push(entries.length === 0 ? `No workers on ${topics.base} yet.` : "detail:  /workers for the full table");
 	} else {
 		const presence = runtime.worker;
 		lines.push(presence ? `worker:  idle, listening for tasks` : "worker:  idle");
@@ -813,7 +831,13 @@ export default function (pi: ExtensionAPI) {
 				ctx.ui.notify(inactiveReason(), "warning");
 				return;
 			}
-			ctx.ui.notify(runtime.orchestrator.workerTable(), "info");
+			ctx.ui.notify(
+				[
+					`WORKERS\n${runtime.orchestrator.workerTable()}`,
+					`ORCHESTRATORS\n${runtime.orchestrator.orchestratorTable()}`,
+				].join("\n\n"),
+				"info",
+			);
 		},
 	});
 
@@ -886,6 +910,14 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_shutdown", async () => {
 		await endSession();
 		currentCtx = undefined;
+	});
+
+	pi.on("agent_start", async () => {
+		if (runtime?.config.role === "orchestrator") runtime.presence?.update({ state: "busy" });
+	});
+
+	pi.on("agent_settled", async () => {
+		if (runtime?.config.role === "orchestrator") runtime.presence?.update({ state: "idle" });
 	});
 
 	pi.on("model_select", async (_event, ctx) => {

@@ -144,8 +144,9 @@ pi --pi-mqtt-start
 # or put "connect": "auto" in pi-mqtt.json
 ```
 
-In the TUI, `/mqtt status` reports the role, broker, room, `state: connected`, and
-how many workers are online. From an orchestrator, `/workers` prints the full table. Check from the orchestrator too — `rpi5`-style ids
+In the TUI, `/mqtt status` reports the role, session name, broker, room,
+`state: connected`, how many workers are online, and which orchestrators are in the room.
+From an orchestrator, `/workers` prints both tables. Check from the orchestrator too — `rpi5`-style ids
 appear in the worker list.
 
 Start it from the directory tasks should run in: a worker's working directory is

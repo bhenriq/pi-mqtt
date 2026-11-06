@@ -90,6 +90,7 @@ function clip(value: string, width: number): string {
 
 export class Orchestrator {
 	private readonly workers = new Map<string, PresenceMessage>();
+	private readonly orchestrators = new Map<string, PresenceMessage>();
 	private readonly tasks = new Map<string, TaskRecord>();
 	private readonly unsubscribes: Array<() => void> = [];
 	private readonly ackTimers = new Map<string, NodeJS.Timeout>();
@@ -110,6 +111,10 @@ export class Orchestrator {
 				}
 				this.workers.set(payload.workerId, payload);
 				this.onWorkerState(payload.workerId);
+			}),
+			this.link.subscribe(this.topics.orchestratorFilter, (_topic, payload) => {
+				if (!isPresenceMessage(payload)) return;
+				this.orchestrators.set(payload.workerId, payload);
 			}),
 			this.link.subscribe(this.topics.ackFilter, (_topic, payload) => {
 				if (!isAckMessage(payload)) return;
@@ -270,6 +275,38 @@ export class Orchestrator {
 
 	outstanding(): TaskRecord[] {
 		return this.list().filter((record) => record.state === "queued" || record.state === "sent" || record.state === "running");
+	}
+
+	orchestratorEntries(): WorkerEntry[] {
+		const now = Date.now();
+		const staleAfter = this.options.heartbeatMs * STALE_FACTOR;
+		return [...this.orchestrators.values()]
+			.filter((presence) => presence.state !== "offline")
+			.map((presence) => {
+				const ageMs = now - presence.updatedAt;
+				return { presence, ageMs, stale: ageMs > staleAfter };
+			})
+			.sort((a, b) => a.presence.workerId.localeCompare(b.presence.workerId));
+	}
+
+	orchestratorTable(): string {
+		const entries = this.orchestratorEntries();
+		if (entries.length === 0) return "No orchestrators in this room right now.";
+		const header = [
+			["ORCHESTRATOR", 20],
+			["STATE", 8],
+			["AGE", 4],
+		]
+			.map(([label, width]) => String(label).padEnd(Number(width)))
+			.join("  ");
+		const rows = entries.map((entry) =>
+			[
+				clip(entry.presence.workerId, 20),
+				clip(entry.stale ? `${entry.presence.state}?` : entry.presence.state, 8),
+				formatAge(entry.ageMs),
+			].join("  "),
+		);
+		return `${header}\n${rows.join("\n")}`;
 	}
 
 	workerTable(): string {

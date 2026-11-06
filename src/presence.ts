@@ -34,11 +34,13 @@ export function buildPresence(
 	identity: PresenceIdentity,
 	state: WorkerState,
 	patch: PresencePatch = {},
+	role: "worker" | "orchestrator" = "worker",
 ): PresenceMessage {
 	return {
 		v: PROTOCOL_VERSION,
 		kind: "presence",
 		version: CLIENT_VERSION,
+		role,
 		...identity,
 		state,
 		updatedAt: Date.now(),
@@ -83,14 +85,15 @@ export class Presence {
 
 	constructor(
 		private readonly link: MqttLink,
-		private readonly topics: Topics,
+		private readonly topic: string,
 		identity: PresenceIdentity,
 		private readonly heartbeatMs: number,
 		private readonly log: LogFn,
 		/** Retained presence lifetime: a dead worker's entry disappears on its own. */
 		private readonly expirySec = 86_400,
+		private readonly role: "worker" | "orchestrator" = "worker",
 	) {
-		this.current = buildPresence(identity, "idle");
+		this.current = buildPresence(identity, "idle", {}, role);
 	}
 
 	/** Current advertised state, so callers can tell a busy worker from an idle one. */
@@ -123,7 +126,7 @@ export class Presence {
 		this.stopped = true;
 		if (this.timer) clearInterval(this.timer);
 		const payload = { ...this.current, state: "offline" as const, updatedAt: Date.now() };
-		void this.link.publish(this.topics.presence(this.current.workerId), payload, {
+		void this.link.publish(this.topic, payload, {
 			retain: true,
 			expirySec: this.expirySec,
 		});
@@ -133,7 +136,7 @@ export class Presence {
 		if (this.stopped || !this.link.online) return;
 		try {
 			await this.link.publish(
-				this.topics.presence(this.current.workerId),
+				this.topic,
 				{ ...this.current, updatedAt: Date.now() },
 				{ retain: true, expirySec: this.expirySec },
 			);
