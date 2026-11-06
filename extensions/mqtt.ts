@@ -744,7 +744,8 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("mqtt", {
-		description: "pi-mqtt status (local state and connected workers), or /mqtt start | stop | restart",
+		description:
+			"pi-mqtt: /mqtt config to edit room and password, /mqtt status, start, stop, restart",
 		handler: async (args, ctx) => {
 			const arg = args.trim().toLowerCase();
 
