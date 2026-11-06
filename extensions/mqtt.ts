@@ -234,15 +234,10 @@ async function connectRuntime(
 
 	const { topics, log } = current;
 	let config = current.config;
-	if (config.role === "worker") {
-		const chosen = await chooseWorkerId(pi, ctx, config, topics, interactive);
-		if (!chosen) {
-			ctx.ui.notify("pi-mqtt: join cancelled", "info");
-			return false;
-		}
-		sessionWorkerId = chosen;
-		config = { ...config, worker: { ...config.worker, workerId: chosen } };
-	}
+	const chosen = await chooseSessionId(pi, ctx, config, topics, interactive);
+	if (!chosen) return false;
+	sessionWorkerId = chosen;
+	config = { ...config, worker: { ...config.worker, workerId: chosen } };
 	const git = readGitInfo(ctx.cwd);
 	const model = describeModel(ctx);
 	const identity: PresenceIdentity = {
@@ -307,7 +302,7 @@ async function connectRuntime(
 		});
 		orchestrator.start();
 		connected.orchestrator = orchestrator;
-		const sessionId = sanitizeId(pi.getSessionName() ?? "") || config.worker.workerId;
+		const sessionId = config.worker.workerId;
 		const presence = new Presence(
 			link,
 			topics.orchestratorPresence(sessionId),
@@ -380,7 +375,7 @@ function statusText(): string {
 	const { config, topics } = session;
 	const lines = [
 		`role:    ${config.role}`,
-		`session: ${api?.getSessionName() ?? "(unnamed)"}`,
+		`session: ${runtime?.config.worker.workerId ?? api?.getSessionName() ?? "(unnamed)"}`,
 		`worker:  ${runtime?.config.worker.workerId ?? config.worker.workerId}`,
 		`broker:  ${config.mqtt.url} (MQTT ${config.mqtt.protocolVersion})`,
 		`room:    ${config.mqtt.cluster}`,
@@ -448,34 +443,46 @@ function sanitizeId(value: string): string {
  * written. Otherwise the session name is offered as the default, and a live id is
  * suffixed (-2, -3, …) rather than refused: several sessions may join from one host.
  */
-async function chooseWorkerId(
+/**
+ * The session's identity in the room.
+ *
+ * An explicitly configured id (flag, env, or `worker.workerId`) is used verbatim.
+ * Otherwise the session must be named: pi's session name (`pi --name billing`, `/name`)
+ * is the default offered, and an unnamed session is refused rather than silently called
+ * after its host — two sessions on one host are the normal case here.
+ */
+async function chooseSessionId(
 	pi: ExtensionAPI,
 	ctx: ExtensionContext,
 	config: AppConfig,
 	topics: Topics,
 	interactive: boolean,
 ): Promise<string | undefined> {
-	const explicit = Boolean(pi.getFlag(FLAG_ID) ?? process.env.PI_MQTT_WORKER_ID);
-	const configured = config.worker.workerId;
-	const hostDerived = configured === hostname().toLowerCase().replace(/[^a-z0-9_-]+/g, "-").slice(0, 48);
-	const pinned = explicit || !hostDerived;
+	const explicit = sanitizeId(
+		String(pi.getFlag(FLAG_ID) ?? process.env.PI_MQTT_WORKER_ID ?? ""),
+	);
+	if (explicit) return sessionWorkerId ?? explicit;
 
-	let base = sessionWorkerId ?? (pinned ? configured : undefined);
-	if (!base) {
-		const sessionName = sanitizeId(pi.getSessionName() ?? "");
-		if (interactive && ctx.hasUI) {
-			const answer = await ctx.ui.input(
-				"Name this session (worker id)",
-				sessionName || configured,
-			);
-			if (answer === undefined) return undefined;
-			base = sanitizeId(answer) || sessionName || configured;
-		} else {
-			base = sessionName || configured;
-		}
+	const named = sanitizeId(pi.getSessionName() ?? "") || sessionWorkerId;
+	if (named) return named;
+
+	if (!interactive || !ctx.hasUI) {
+		ctx.ui.notify(
+			'pi-mqtt: this session has no name. Start pi with --name <name>, or set worker.workerId / --pi-mqtt-id.',
+			"error",
+		);
+		return undefined;
 	}
-	if (!base) base = configured;
 
+	const answer = await ctx.ui.input("Session name (required)", "");
+	if (answer === undefined) return undefined;
+	const chosen = sanitizeId(answer);
+	if (!chosen) {
+		ctx.ui.notify("pi-mqtt: a session name is required to join a room.", "warning");
+		return undefined;
+	}
+
+	// A live worker with that name gets a suffix; an orchestrator name may repeat.
 	const link = new MqttLink(config.mqtt, {
 		clientId: `pi-mqtt-probe-${Math.random().toString(36).slice(2, 8)}`,
 		log: () => {},
@@ -483,16 +490,17 @@ async function chooseWorkerId(
 	try {
 		await link.connect();
 	} catch {
-		return base; // let the real connect report the problem
+		return chosen;
 	}
-	let candidate = base;
+	let candidate = chosen;
 	try {
-		for (let suffix = 2; suffix <= 20; suffix += 1) {
-			if (pinned) break;
-			const existing = await probePresence(link, topics, candidate, 900);
-			const live = existing && existing.state !== "offline" && Date.now() - existing.updatedAt < config.worker.heartbeatMs * 3;
-			if (!live) break;
-			candidate = `${base}-${suffix}`;
+		if (config.role === "worker") {
+			for (let suffix = 2; suffix <= 20; suffix += 1) {
+				const existing = await probePresence(link, topics, candidate, 900);
+				const live = existing && existing.state !== "offline" && Date.now() - existing.updatedAt < config.worker.heartbeatMs * 3;
+				if (!live) break;
+				candidate = `${chosen}-${suffix}`;
+			}
 		}
 	} finally {
 		await link.close();

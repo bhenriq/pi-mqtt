@@ -307,6 +307,6 @@ orchestrator)
 	log "extension source: $EXT_SOURCE"
 	run "-> $URL (cluster $CLUSTER)" \
 		env $(SESSION_ENV) \
-		pi $EXT_ARGS --pi-mqtt-start --pi-mqtt-role orchestrator
+		pi $EXT_ARGS --pi-mqtt-start --pi-mqtt-role orchestrator --pi-mqtt-id orchestrator
 	;;
 esac

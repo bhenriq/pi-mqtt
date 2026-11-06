@@ -232,16 +232,19 @@ means you see each other, anything else and you do not. There are no per-machine
 accounts to create — hand someone the room password and they can join.
 
 The **worker id** is declared, not authenticated, and it is per *session*: several
-sessions can join from one host. On `/mqtt start` a worker asks for a name, defaulting
-to the pi session name (`pi --name billing`) or the hostname. If that name is already
-live, it is suffixed: `osiris`, `osiris-2`, `osiris-3`.
+sessions can join from one host. Joining requires a name — on `/mqtt start` you are
+asked for one, prefilled with the pi session name (`pi --name billing`). An unnamed
+session is refused, and so is an empty answer: two sessions on one host is the normal
+case, so guessing from the hostname would be wrong. A name that is already live is
+suffixed (`billing`, `billing-2`).
 
 An id given explicitly — `--pi-mqtt-id`, `PI_MQTT_WORKER_ID`, or `worker.workerId` in
 the file — is used verbatim with no question and no suffixing, so a collision is an
 error rather than a rename. That is the form to use for a long-lived worker you pin
 tasks to.
 
-Orchestrators announce themselves too, on `pi/v1/<room>/orchestrators/<id>/presence`, so
+Orchestrators need a name for the same reason (it identifies them in the roster) and
+announce themselves on `pi/v1/<room>/orchestrators/<id>/presence`, so
 you can see who is coordinating: `/mqtt status` lists them and `/workers` prints a separate
 ORCHESTRATORS table. They are a different topic from workers by design, so nothing can
 dispatch a task to one. The id is the session name (`pi --name demo`), else the hostname.

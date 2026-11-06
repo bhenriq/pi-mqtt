@@ -93,10 +93,10 @@ visibility. There are no per-machine accounts to create: hand out the room passw
 another session can join.
 
 **The worker id is declared, not authenticated, and scoped to the session.** Running a
-second `pi` on the same machine is fine: `/mqtt start` asks for a name, defaulting to the
-pi session name (`pi --name billing`) or the hostname, and a name already in use becomes
-`hostname-2`, `hostname-3`. Pass `--pi-mqtt-id` (or set `worker.workerId`) when you want
-an exact, stable id that is never renamed.
+second `pi` on the same machine is fine, but joining needs a name: `/mqtt start` asks for
+one (prefilled with the pi session name, `pi --name billing`), and an empty answer is
+refused. A name already in use becomes `billing-2`. Pass `--pi-mqtt-id` (or set
+`worker.workerId`) for an exact, stable id that is never renamed and never prompts.
 
 If the same pinned id is claimed twice, the broker evicts the older session, which stops
 with `worker id "x" was taken over by another session`.
