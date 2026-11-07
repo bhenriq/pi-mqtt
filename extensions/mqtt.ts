@@ -507,7 +507,10 @@ function withSubcommandCompletion(current: AutocompleteProvider): AutocompletePr
 			return current.getSuggestions(lines, cursorLine, cursorCol, options);
 		},
 		applyCompletion(lines, cursorLine, cursorCol, item, prefix) {
-			if (!prefix.startsWith("/mqtt")) {
+			// Only our own subcommand items carry "/mqtt <name>"; the built-in provider's
+			// command item for "/mqtt" has no space, and rewriting it would drop the slash
+			// and turn the command into a prompt.
+			if (!item.value.startsWith("/mqtt ")) {
 				return current.applyCompletion(lines, cursorLine, cursorCol, item, prefix);
 			}
 			const updated = applySubcommandCompletion(lines[cursorLine] ?? "", cursorCol, item.value, prefix);
