@@ -13,6 +13,7 @@ import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { AutocompleteItem, AutocompleteProvider } from "@earendil-works/pi-tui";
 import {
 	loadConfig,
 	readConfigObject,
@@ -27,6 +28,7 @@ import { MqttLink, type LogFn } from "../src/mqtt.ts";
 import { Orchestrator, type TaskRecord } from "../src/orchestrator.ts";
 import { Presence, buildPresence, probePresence, type PresenceIdentity } from "../src/presence.ts";
 import { isKickMessage, topicsFor, type Topics } from "../src/protocol.ts";
+import { subcommandSuggestions } from "../src/subcommands.ts";
 import { Worker } from "../src/worker.ts";
 
 const FLAG_ROLE = "pi-mqtt-role";
@@ -83,6 +85,7 @@ let api: ExtensionAPI | undefined;
 /** Worker id chosen for this session at join time (not the file's default). */
 let sessionWorkerId: string | undefined;
 let session: Session | undefined;
+let completionRegistered = false;
 let runtime: Runtime | undefined;
 let currentCtx: ExtensionContext | undefined;
 let logs: LogLine[] = [];
@@ -385,6 +388,7 @@ async function disconnectRuntime(): Promise<void> {
 
 /** Session end: disconnect (gracefully) and forget the config. */
 async function endSession(): Promise<void> {
+	completionRegistered = false;
 	await disconnectRuntime();
 	session = undefined;
 	sessionWorkerId = undefined;
@@ -479,6 +483,30 @@ function resolveSessionId(pi: ExtensionAPI, config: AppConfig): string | undefin
 	if (!named) return undefined;
 	const base = sanitizeId(config.worker.name ?? "") || config.worker.workerId;
 	return `${base}_${named}`;
+}
+
+/**
+ * `/mqtt <subcommand>` completion. The built-in provider knows commands, not their
+ * arguments, so this stacks a small wrapper that only reacts to a partial subcommand and
+ * otherwise defers to it.
+ */
+function withSubcommandCompletion(current: AutocompleteProvider): AutocompleteProvider {
+	return {
+		async getSuggestions(lines, cursorLine, cursorCol, options) {
+			const text = (lines[cursorLine] ?? "").slice(0, cursorCol);
+			const suggestion = subcommandSuggestions(text);
+			if (suggestion) {
+				return { items: suggestion.items as AutocompleteItem[], prefix: suggestion.prefix };
+			}
+			return current.getSuggestions(lines, cursorLine, cursorCol, options);
+		},
+		applyCompletion(lines, cursorLine, cursorCol, item, prefix) {
+			return current.applyCompletion(lines, cursorLine, cursorCol, item, prefix);
+		},
+		shouldTriggerFileCompletion(lines, cursorLine, cursorCol) {
+			return current.shouldTriggerFileCompletion?.(lines, cursorLine, cursorCol) ?? true;
+		},
+	};
 }
 
 /** Why a tool or command cannot do its job right now. */
@@ -969,6 +997,10 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_start", async (_event, ctx) => {
 		currentCtx = ctx;
+		if (!completionRegistered) {
+			completionRegistered = true;
+			ctx.ui.addAutocompleteProvider(withSubcommandCompletion);
+		}
 		api = pi;
 		await endSession();
 		try {

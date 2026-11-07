@@ -159,6 +159,9 @@ sessions that died long ago. The sender stays. Since a room is one shared passwo
 member can do this: the password is the capability, and the kick is cooperative, not
 enforced by the broker.
 
+Typing `/mqtt ` offers the subcommands as completions (`/mqtt co` → `config`, `connect`), by
+stacking a small provider on the editor's built-in one.
+
 Commands: `/tasks` (dispatched tasks), `/mqtt config`
 (interactive editor) and `/mqtt` — bare or `/mqtt status` for local state and counts,
 `/mqtt connect` / `/mqtt disconnect` / `/mqtt reconnect` to connect and disconnect.
