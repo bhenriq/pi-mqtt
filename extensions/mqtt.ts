@@ -378,7 +378,7 @@ async function disconnectRuntime(): Promise<void> {
 	if (current.timer) clearTimeout(current.timer);
 	current.orchestrator?.stop();
 	current.worker?.stop();
-	current.presence?.stop();
+	await current.presence?.stop();
 	await current.link.close();
 	if (current.config.role === "orchestrator" && api) {
 		const keep = api.getActiveTools().filter((name) => !ORCHESTRATOR_TOOLS.includes(name));

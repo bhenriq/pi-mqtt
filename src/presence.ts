@@ -116,16 +116,31 @@ export class Presence {
 	}
 
 	/**
-	 * Leave the room: delete the retained presence rather than marking it offline, so a
-	 * kicked session disappears from the roster instead of lingering as a corpse.
+	 * Leave the room.
+	 *
+	 * Deletes the retained presence rather than writing `offline`: a session that
+	 * disconnected is gone, and an entry saying "offline" only invites the next reader to
+	 * wonder when. A crash still leaves `offline` behind, because the Last Will is fixed at
+	 * connect time — that is the honest difference between leaving and dying.
 	 */
-	forget(): void {
+	async stop(): Promise<void> {
 		if (this.stopped) return;
 		this.stopped = true;
 		if (this.timer) clearInterval(this.timer);
-		void this.link.publishEmpty(this.topic).catch((error: unknown) => {
-			this.log("warn", `could not clear presence: ${(error as Error).message}`);
-		});
+		try {
+			// Bounded: leaving must not hold up quitting when the broker is unreachable.
+			await Promise.race([
+				this.link.publishEmpty(this.topic),
+				new Promise((resolve) => setTimeout(resolve, 2500)),
+			]);
+		} catch (error) {
+			this.log("warn", `could not clear presence on leave: ${(error as Error).message}`);
+		}
+	}
+
+	/** Fire-and-forget leave, for paths that cannot await. */
+	forget(): void {
+		void this.stop();
 	}
 
 	/** Republish the current state now (used after a reconnect). */
@@ -133,17 +148,6 @@ export class Presence {
 		if (this.stopped) return;
 		this.current = { ...this.current, updatedAt: Date.now() };
 		void this.publish();
-	}
-
-	stop(): void {
-		if (this.stopped) return;
-		this.stopped = true;
-		if (this.timer) clearInterval(this.timer);
-		const payload = { ...this.current, state: "offline" as const, updatedAt: Date.now() };
-		void this.link.publish(this.topic, payload, {
-			retain: true,
-			expirySec: this.expirySec,
-		});
 	}
 
 	private async publish(): Promise<void> {
