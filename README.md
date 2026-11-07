@@ -124,8 +124,8 @@ PI_MQTT_URL=mqtt://127.0.0.1:1883 \
 PI_MQTT_URL=mqtt://127.0.0.1:1883 \
   pi --extension ./extensions/mqtt.ts --pi-mqtt-role orchestrator
 
-# then, in the orchestrator session
-/mqtt start
+# then, in the orchestrator session (started with --name main)
+/mqtt connect
 ```
 
 `/mqtt status` reports the local state and the whole roster (workers and
@@ -160,7 +160,7 @@ cooperative, not enforced by the broker.
 
 Commands: `/tasks` (dispatched tasks), `/mqtt config`
 (interactive editor) and `/mqtt` — bare or `/mqtt status` for local state and counts,
-`/mqtt start` / `/mqtt stop` / `/mqtt restart` to connect and disconnect.
+`/mqtt connect` / `/mqtt disconnect` / `/mqtt reconnect` to connect and disconnect.
 
 `/mqtt config` edits `~/.pi/agent/pi-mqtt.json` (or the project file, or
 `--pi-mqtt-config`) without hand-editing JSON: role, broker, room, room password
@@ -169,7 +169,7 @@ validates as you type, can **test the connection** before saving, shows which va
 are overridden by an environment variable, writes atomically with mode 600, and
 reconnects on save. Repos stay a file-only setting.
 
-Connecting is explicit: a configured session still opens no socket until `/mqtt start`,
+Connecting is explicit: a configured session still opens no socket until `/mqtt connect`,
 unless it was launched with `--pi-mqtt-start` or its config says `"connect": "auto"`.
 
 Dropped connections are re-established automatically (2s), subscriptions are re-applied, and a
@@ -201,7 +201,7 @@ export PI_MQTT_URL=wss://broker-production-0bfd.up.railway.app
 
 # orchestrator
 pi                                   # config: role orchestrator, room "dev"
-/mqtt start
+/mqtt connect
 
 # worker
 PI_MQTT_ROOM=dev PI_MQTT_ROOM_PASSWORD=... \
@@ -231,7 +231,7 @@ password), `broker` (where it lives), and optional `worker` (behaviour such as
 
 `name` is the machine's stable base name. The session id is `<name>_<pi session name>`
 (`prudential_billing`) — so the pi session must be named to join: `pi --name billing`, or
-`/name billing` before `/mqtt start`. An unnamed session is refused rather than being
+`/name billing` before `/mqtt connect`. An unnamed session is refused rather than being
 given a generated id — there is no override: an id is a function of the machine name and
 the pi session name, nothing else. Without `name`, the computer name is the base.
 

@@ -212,7 +212,7 @@ async function prepareSession(pi: ExtensionAPI, ctx: ExtensionContext): Promise<
 		return;
 	}
 	ctx.ui.notify(
-		`pi-mqtt configured as ${config.role} "${config.worker.workerId}" — run /mqtt start to connect`,
+		`pi-mqtt configured as ${config.role} "${config.worker.workerId}" — run /mqtt connect to connect`,
 		"info",
 	);
 }
@@ -231,10 +231,10 @@ async function connectRuntime(
 
 	// Auto-connect must not invent an identity: an unnamed session that starts itself would
 	// claim whatever id the config implies, and nobody asked it to join. A manual
-	// /mqtt start may use an explicit id, because that is a deliberate act.
+	// /mqtt connect may use an explicit id, because that is a deliberate act.
 	if (options.auto && !sanitizeId(pi.getSessionName() ?? "")) {
 		ctx.ui.notify(
-			'pi-mqtt: connect is set to "auto" but this session has no name — start pi with --name <name>, or run /mqtt start manually.',
+			'pi-mqtt: connect is set to "auto" but this session has no name — start pi with --name <name>, or run /mqtt connect manually.',
 			"warning",
 		);
 		return false;
@@ -245,7 +245,7 @@ async function connectRuntime(
 	const chosen = resolveSessionId(pi, config);
 	if (!chosen) {
 		ctx.ui.notify(
-			"pi-mqtt: this session has no name. Name it first — /name <name>, or start pi with --name <name> — then /mqtt start.",
+			"pi-mqtt: this session has no name. Name it first — /name <name>, or start pi with --name <name> — then /mqtt connect.",
 			"error",
 		);
 		return false;
@@ -405,7 +405,7 @@ function statusText(): string {
 	];
 
 	if (!runtime) {
-		lines.push("state:   disconnected — /mqtt start to connect");
+		lines.push("state:   disconnected — /mqtt connect to connect");
 		return lines.join("\n");
 	}
 
@@ -484,7 +484,7 @@ function resolveSessionId(pi: ExtensionAPI, config: AppConfig): string | undefin
 /** Why a tool or command cannot do its job right now. */
 function inactiveReason(): string {
 	if (!session) return "pi-mqtt is not configured in this session (no role or broker). See SETUP.md.";
-	if (!runtime) return "pi-mqtt is not connected — run /mqtt start (or launch with --pi-mqtt-start).";
+	if (!runtime) return "pi-mqtt is not connected — run /mqtt connect (or launch with --pi-mqtt-start).";
 	return "pi-mqtt is not active as an orchestrator in this session.";
 }
 
@@ -658,7 +658,7 @@ export default function (pi: ExtensionAPI) {
 		default: false,
 	});
 	pi.registerFlag(FLAG_START, {
-		description: "connect to the broker at session start instead of waiting for /mqtt start",
+		description: "connect to the broker at session start instead of waiting for /mqtt connect",
 		type: "boolean",
 		default: false,
 	});
@@ -883,7 +883,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.registerCommand("mqtt", {
 		description:
-			"pi-mqtt: /mqtt config, status, start, stop, restart, kick, flush",
+			"pi-mqtt: /mqtt config, status, connect, disconnect, reconnect, kick, flush",
 		handler: async (args, ctx) => {
 			const arg = args.trim().toLowerCase();
 
@@ -895,7 +895,7 @@ export default function (pi: ExtensionAPI) {
 				ctx.ui.notify(statusText(), "info");
 				return;
 			}
-			if (arg === "start") {
+			if (arg === "connect") {
 				await connectRuntime(pi, ctx);
 				return;
 			}
@@ -964,7 +964,7 @@ export default function (pi: ExtensionAPI) {
 				);
 				return;
 			}
-			if (arg === "stop") {
+			if (arg === "disconnect") {
 				if (!runtime) {
 					ctx.ui.notify("pi-mqtt is not connected.", "info");
 					return;
@@ -973,13 +973,13 @@ export default function (pi: ExtensionAPI) {
 				ctx.ui.notify("pi-mqtt disconnected.", "info");
 				return;
 			}
-			if (arg === "restart") {
+			if (arg === "reconnect") {
 				await disconnectRuntime();
 				await connectRuntime(pi, ctx);
 				return;
 			}
 			if (arg) {
-				ctx.ui.notify("usage: /mqtt [status|config|start|stop|restart|kick|flush]", "warning");
+				ctx.ui.notify("usage: /mqtt [status|config|connect|disconnect|reconnect|kick|flush]", "warning");
 				return;
 			}
 

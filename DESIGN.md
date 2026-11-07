@@ -133,7 +133,7 @@ second publisher must never produce a second terminal state.
 ## Connecting is explicit
 
 A configured install does not reach the network on its own. `session_start` reads the config and
-stops there; `/mqtt start` connects, `/mqtt stop` disconnects. A worker is the exception in
+stops there; `/mqtt connect` connects, `/mqtt disconnect` disconnects. A worker is the exception in
 practice, not in principle: it must already be listening when a task arrives, so it opts in at
 launch with `--pi-mqtt-start` or `"connect": "auto"`.
 

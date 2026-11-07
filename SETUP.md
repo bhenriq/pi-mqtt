@@ -92,7 +92,7 @@ another session can join.
 **The session id is derived and scoped to the session.** `name` is the machine's base, and
 the id is `<name>_<pi session name>` (`prudential_billing`) — for workers and orchestrators
 alike. That makes naming the pi session mandatory: `pi --name billing`, or `/name billing`
-then `/mqtt start`. An unnamed session cannot join and says so. There is no renaming either:
+then `/mqtt connect`. An unnamed session cannot join and says so. There is no renaming either:
 a second session deriving the same id takes the first one's place, and the evicted session
 stops. There is no id override: the id is always `<name>_<pi session name>`.
 
@@ -106,7 +106,7 @@ stops. There is no id override: the id is always `<name>_<pi session name>`.
 | `broker.url` | The scheme picks the transport: `wss://` (TLS WebSocket, usual for a hosted broker), `mqtts://` (TLS on a raw port), `mqtt://`/`ws://` (plain, local only) |
 | `room.name` | The room — also the topic prefix. Everyone who should see each other must share it |
 | `room.password` | The room's shared password. Anyone holding it can join the room |
-| `connect` | `"manual"` (default) connects only when you run `/mqtt start`; `"auto"` connects at session start, and only for a named session (`pi --name x`) |
+| `connect` | `"manual"` (default) connects only when you run `/mqtt connect`; `"auto"` connects at session start, and only for a named session (`pi --name x`) |
 | `worker` | Optional behaviour: `heartbeatMs`, `taskExpirySec`, `allowModelOverride`, `repos` |
 
 ### Where the file is read from
@@ -130,8 +130,8 @@ Start the worker first, then the orchestrator.
 **On the worker machine:**
 
 ```bash
-pi --name billing    # name the session; it becomes the default worker id
-/mqtt start          # asks for a name (default: billing), then connects
+pi --name billing     # the pi session must be named — the id is <name>_billing
+/mqtt connect         # join as <worker name>_billing
 ```
 
 Or connect at launch, which is what a machine that must be listening wants:
@@ -152,8 +152,8 @@ wherever `pi` was started.
 **On the orchestrator machine:**
 
 ```bash
-pi
-/mqtt start
+pi --name main
+/mqtt connect
 which workers are available?
 ask worker-1 what time it is
 ```
@@ -184,7 +184,7 @@ worker is idle), `timeoutMs`, `maxCostUsd`, `repo: { baseSha | baseRef, branch }
 
 | Symptom | Cause and fix |
 |---|---|
-| Nothing happens, no tools, no `/mqtt status` | Not connected. Run `/mqtt start` (connecting is explicit; `--pi-mqtt-start` or `"connect": "auto"` connects at launch) |
+| Nothing happens, no tools, no `/mqtt status` | Not connected. Run `/mqtt connect` (connecting is explicit; `--pi-mqtt-start` or `"connect": "auto"` connects at launch) |
 | Nothing happens, and `/mqtt` says "not configured" | No role. Add `"role"` to the config, or pass `--pi-mqtt-role` |
 | `pi-mqtt inactive: no broker url` | No `broker.url` in the file and no `PI_MQTT_URL` |
 | `pi-mqtt: cannot reach wss://…: self-signed certificate` | Broker uses a private CA: set `mqtt.caFile` to its PEM bundle |
