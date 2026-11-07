@@ -26,7 +26,7 @@ import { readGitInfo } from "../src/git.ts";
 import { MqttLink, type LogFn } from "../src/mqtt.ts";
 import { Orchestrator, type TaskRecord } from "../src/orchestrator.ts";
 import { Presence, buildPresence, probePresence, type PresenceIdentity } from "../src/presence.ts";
-import { topicsFor, type Topics } from "../src/protocol.ts";
+import { isKickMessage, topicsFor, type Topics } from "../src/protocol.ts";
 import { Worker } from "../src/worker.ts";
 
 const FLAG_ROLE = "pi-mqtt-role";
@@ -331,6 +331,16 @@ async function connectRuntime(pi: ExtensionAPI, ctx: ExtensionContext): Promise<
 		worker.start();
 		connected.worker = worker;
 	}
+
+	link.subscribe(topics.roomControl, (_topic, payload) => {
+		if (!isKickMessage(payload)) return;
+		if (payload.from === config.worker.workerId) return; // our own message
+		if (!runtime) return;
+		const why = payload.reason ? `: ${payload.reason}` : "";
+		ctx.ui.notify(`pi-mqtt: ${payload.from} removed everyone from the room${why}. Disconnected.`, "warning");
+		if (runtime.config.role === "worker") currentCtx?.abort();
+		void disconnectRuntime();
+	});
 
 	runtime = connected;
 	ctx.ui.notify(`pi-mqtt ${config.role} "${config.worker.workerId}" connected to ${topics.base}`, "info");
@@ -875,7 +885,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.registerCommand("mqtt", {
 		description:
-			"pi-mqtt: /mqtt config to edit room and password, /mqtt status, start, stop, restart",
+			"pi-mqtt: /mqtt config to edit room and password, /mqtt status, start, stop, restart, kick",
 		handler: async (args, ctx) => {
 			const arg = args.trim().toLowerCase();
 
@@ -889,6 +899,24 @@ export default function (pi: ExtensionAPI) {
 			}
 			if (arg === "start") {
 				await connectRuntime(pi, ctx);
+				return;
+			}
+			if (arg.startsWith("kick")) {
+				if (!runtime) {
+					ctx.ui.notify("pi-mqtt is not connected.", "info");
+					return;
+				}
+				const reason = args.trim().slice(4).trim() || undefined;
+				const from = runtime.config.worker.workerId;
+				await runtime.link.publish(
+					runtime.topics.roomControl,
+					{ v: 1, kind: "kick", from, at: Date.now(), ...(reason ? { reason } : {}) },
+					{},
+				);
+				ctx.ui.notify(
+					`pi-mqtt: asked every other session in the room to leave${reason ? ` (${reason})` : ""}.`,
+					"info",
+				);
 				return;
 			}
 			if (arg === "stop") {
@@ -906,7 +934,7 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 			if (arg) {
-				ctx.ui.notify("usage: /mqtt [status|config|start|stop|restart]", "warning");
+				ctx.ui.notify("usage: /mqtt [status|config|start|stop|restart|kick]", "warning");
 				return;
 			}
 

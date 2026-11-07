@@ -16,6 +16,7 @@ import type { Presence } from "./presence.ts";
 import {
 	isCancelMessage,
 	isControlMessage,
+	isKickMessage,
 	taskPromptFrame,
 	type ResultMessage,
 	type TaskMessage,
@@ -68,6 +69,10 @@ export class Worker {
 			this.link.subscribe(controlTopic, (_topic, payload) => {
 				if (!isControlMessage(payload)) {
 					log("warn", `ignoring malformed control message on ${controlTopic}`);
+					return;
+				}
+				if (isKickMessage(payload)) {
+					// Room-wide kicks arrive on the room control topic, not here.
 					return;
 				}
 				if (isCancelMessage(payload)) this.handleCancel(payload.taskId);

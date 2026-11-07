@@ -38,6 +38,16 @@ export interface TaskMessage {
 	createdAt: number;
 }
 
+/** Room-wide eviction: every session in the room disconnects itself. */
+export interface KickMessage {
+	v: number;
+	kind: "kick";
+	/** Session id that asked for it, so the sender ignores its own message. */
+	from: string;
+	reason?: string;
+	at: number;
+}
+
 export interface CancelMessage {
 	v: number;
 	kind: "cancel";
@@ -45,7 +55,7 @@ export interface CancelMessage {
 	reason?: string;
 }
 
-export type ControlMessage = TaskMessage | CancelMessage;
+export type ControlMessage = TaskMessage | CancelMessage | KickMessage;
 
 /** Published as soon as a worker actually begins a task. */
 export interface AckMessage {
@@ -120,6 +130,8 @@ export function topicsFor(cluster: string) {
 		control: (workerId: string) => `${base}/workers/${workerId}/ctl`,
 		ack: (workerId: string) => `${base}/workers/${workerId}/ack`,
 		result: (taskId: string) => `${base}/results/${taskId}`,
+		/** Room-wide announcements, currently only "kick". */
+		roomControl: `${base}/control`,
 		presenceFilter: `${base}/workers/+/presence`,
 		orchestratorFilter: `${base}/orchestrators/+/presence`,
 		ackFilter: `${base}/workers/+/ack`,
@@ -191,8 +203,12 @@ export function isCancelMessage(value: Json): value is Json & CancelMessage {
 	return hasEnvelope(value, "cancel") && isStr(value.taskId);
 }
 
+export function isKickMessage(value: Json): value is Json & KickMessage {
+	return hasEnvelope(value, "kick") && isStr(value.from);
+}
+
 export function isControlMessage(value: Json): value is Json & ControlMessage {
-	return isTaskMessage(value) || isCancelMessage(value);
+	return isTaskMessage(value) || isCancelMessage(value) || isKickMessage(value);
 }
 
 export function isAckMessage(value: Json): value is Json & AckMessage {
