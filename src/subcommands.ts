@@ -49,3 +49,20 @@ export function subcommandSuggestions(textBeforeCursor: string): SubcommandSugge
 	if (items.length === 0) return undefined;
 	return { items, prefix: `${head}${partial}` };
 }
+
+/**
+ * Replace the typed prefix with the chosen subcommand.
+ *
+ * Done here rather than by the editor's built-in provider: that one assumes a bare command
+ * name and re-adds the leading slash, which turned `/mqtt status` into `//mqtt status`.
+ */
+export function applySubcommandCompletion(
+	line: string,
+	cursorCol: number,
+	value: string,
+	prefix: string,
+): { line: string; cursorCol: number } {
+	const start = Math.max(0, cursorCol - prefix.length);
+	const next = `${line.slice(0, start)}${value}${line.slice(cursorCol)}`;
+	return { line: next, cursorCol: start + value.length };
+}

@@ -28,7 +28,7 @@ import { MqttLink, type LogFn } from "../src/mqtt.ts";
 import { Orchestrator, type TaskRecord } from "../src/orchestrator.ts";
 import { Presence, buildPresence, probePresence, type PresenceIdentity } from "../src/presence.ts";
 import { isKickMessage, topicsFor, type Topics } from "../src/protocol.ts";
-import { subcommandSuggestions } from "../src/subcommands.ts";
+import { applySubcommandCompletion, subcommandSuggestions } from "../src/subcommands.ts";
 import { Worker } from "../src/worker.ts";
 
 const FLAG_ROLE = "pi-mqtt-role";
@@ -501,7 +501,13 @@ function withSubcommandCompletion(current: AutocompleteProvider): AutocompletePr
 			return current.getSuggestions(lines, cursorLine, cursorCol, options);
 		},
 		applyCompletion(lines, cursorLine, cursorCol, item, prefix) {
-			return current.applyCompletion(lines, cursorLine, cursorCol, item, prefix);
+			if (!prefix.startsWith("/mqtt")) {
+				return current.applyCompletion(lines, cursorLine, cursorCol, item, prefix);
+			}
+			const updated = applySubcommandCompletion(lines[cursorLine] ?? "", cursorCol, item.value, prefix);
+			const next = [...lines];
+			next[cursorLine] = updated.line;
+			return { lines: next, cursorLine, cursorCol: updated.cursorCol };
 		},
 		shouldTriggerFileCompletion(lines, cursorLine, cursorCol) {
 			return current.shouldTriggerFileCompletion?.(lines, cursorLine, cursorCol) ?? true;
@@ -778,16 +784,24 @@ export default function (pi: ExtensionAPI) {
 					isError: true,
 				};
 			}
-			const outcome = current.orchestrator.dispatch({
-				to: params.to,
-				prompt: params.prompt,
-				...(params.notify ? { notify: params.notify } : {}),
-				...(params.ifBusy ? { ifBusy: params.ifBusy } : {}),
-				...(params.timeoutMs !== undefined ? { timeoutMs: params.timeoutMs } : {}),
-				...(params.maxCostUsd !== undefined ? { maxCostUsd: params.maxCostUsd } : {}),
-				...(params.model ? { model: params.model } : {}),
-				...(params.repo ? { repo: params.repo } : {}),
-			});
+			const send = () =>
+				current.orchestrator!.dispatch({
+					to: params.to,
+					prompt: params.prompt,
+					...(params.notify ? { notify: params.notify } : {}),
+					...(params.ifBusy ? { ifBusy: params.ifBusy } : {}),
+					...(params.timeoutMs !== undefined ? { timeoutMs: params.timeoutMs } : {}),
+					...(params.maxCostUsd !== undefined ? { maxCostUsd: params.maxCostUsd } : {}),
+					...(params.model ? { model: params.model } : {}),
+					...(params.repo ? { repo: params.repo } : {}),
+				});
+			let outcome = send();
+			// A worker that just connected may not have its retained presence delivered yet;
+			// give that race a moment before reporting it as unknown.
+			if (!outcome.ok && outcome.error.startsWith("unknown worker")) {
+				await new Promise((resolve) => setTimeout(resolve, 1200));
+				outcome = send();
+			}
 			if (!outcome.ok) {
 				return {
 					content: [{ type: "text", text: `dispatch failed: ${outcome.error}` }],
