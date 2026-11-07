@@ -160,19 +160,16 @@ sessions that died long ago. The sender stays. Since a room is one shared passwo
 member can do this: the password is the capability, and the kick is cooperative, not
 enforced by the broker.
 
-Typing `/mqtt ` offers the subcommands as completions (`/mqtt con` → `config`, `connect`), by
-stacking a small provider on the editor's built-in one.
+Typing `/mqtt ` offers the subcommands as completions (`/mqtt con` → `connect`), by stacking
+a small provider on the editor's built-in one.
 
-Commands: `/mqtt status`
-(interactive editor) and `/mqtt` — bare or `/mqtt status` for local state and counts,
-`/mqtt workers`, `/mqtt tasks`, and `/mqtt connect` / `/mqtt disconnect`.
+Commands: `/mqtt status` (configuration and local state), `/mqtt workers` (the roster),
+`/mqtt tasks` (dispatched tasks), `/mqtt connect` / `/mqtt disconnect`, and `/mqtt kick`.
+Bare `/mqtt` is `status` plus recent log lines.
 
-`/mqtt status` edits `~/.pi/agent/pi-mqtt.json` (or the project file, or
-`--pi-mqtt-config`) without hand-editing JSON: role, broker, room, room password
-(masked in the TUI), connect mode, worker id, and an advanced submenu. It
-validates as you type, can **test the connection** before saving, shows which values
-are overridden by an environment variable, writes atomically with mode 600, and
-reconnects on save. Repos stay a file-only setting.
+Editing configuration is a plain edit of `~/.pi/agent/pi-mqtt.json` (or the project file, or
+`--pi-mqtt-config <path>`); `/mqtt status` shows what it resolved to, including which value
+came from an environment variable. See [`pi-mqtt.example.json`](./pi-mqtt.example.json).
 
 Connecting is explicit: a configured session still opens no socket until `/mqtt connect`,
 unless it was launched with `--pi-mqtt-start` or its config says `"connect": "auto"`.

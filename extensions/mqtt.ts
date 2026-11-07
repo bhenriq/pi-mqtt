@@ -15,6 +15,7 @@ import { Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AutocompleteItem, AutocompleteProvider } from "@earendil-works/pi-tui";
 import {
+	envOverrideFor,
 	loadConfig,
 	readConfigObject,
 	resolveConfigPath,
@@ -415,6 +416,10 @@ function statusText(): string {
 	}
 
 	lines.push(`auth:    ${config.mqtt.token ? "room password" : `user ${config.mqtt.username ?? "?"}`}`);
+	const fromEnv = ["role", "connect", "url", "room", "roomPassword", "username", "password", "caFile"]
+		.map((field) => envOverrideFor(field))
+		.filter((name): name is string => Boolean(name));
+	if (fromEnv.length > 0) lines.push(`env:     ${fromEnv.join(", ")} (these win over the file)`);
 	lines.push(`state:   connected (online: ${runtime.link.online})`);
 	const reconnects = runtime.link.reconnects;
 	if (reconnects > 0) {
