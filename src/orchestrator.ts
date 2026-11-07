@@ -305,25 +305,6 @@ export class Orchestrator {
 			.sort((a, b) => a.presence.workerId.localeCompare(b.presence.workerId));
 	}
 
-	orchestratorTable(): string {
-		const entries = this.orchestratorEntries();
-		if (entries.length === 0) return "No orchestrators in this room right now.";
-		const header = [
-			["ORCHESTRATOR", 20],
-			["STATE", 8],
-			["AGE", 4],
-		]
-			.map(([label, width]) => String(label).padEnd(Number(width)))
-			.join("  ");
-		const rows = entries.map((entry) =>
-			[
-				clip(entry.presence.workerId, 20),
-				clip(entry.stale ? `${entry.presence.state}?` : entry.presence.state, 8),
-				formatAge(entry.ageMs),
-			].join("  "),
-		);
-		return `${header}\n${rows.join("\n")}`;
-	}
 
 	/** Workers and orchestrators in one table, role as a column. */
 	combinedTable(): string {
@@ -369,36 +350,6 @@ export class Orchestrator {
 		return [header, ...workerRows, ...orchestratorRows].join("\n");
 	}
 
-	workerTable(): string {
-		const entries = this.entries();
-		if (entries.length === 0) return `No workers on ${this.topics.base} yet.`;
-		const header = (
-			[
-				["WORKER", 16],
-				["STATE", 12],
-				["REPO", 28],
-				["MODEL", 24],
-				["CWD", 5],
-				["AGE", 3],
-			] as const
-		)
-			.map(([label, width]) => label.padEnd(width))
-			.join("  ");
-		const rows = entries.map(({ presence, stale, ageMs }) => {
-			const state = stale ? `${presence.state}?` : presence.state;
-			const where = [presence.repo, presence.branch].filter(Boolean).join("@") || "-";
-			const task = presence.activeTaskId ? ` ${presence.activeTaskId}` : "";
-			return [
-				clip(presence.workerId, 16),
-				clip(state + task, 12),
-				clip(where, 28),
-				clip(presence.model ?? "-", 24),
-				presence.cwd,
-				formatAge(ageMs),
-			].join("  ");
-		});
-		return `${header}\n${rows.join("\n")}`;
-	}
 
 	taskTable(): string {
 		const records = this.list();

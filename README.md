@@ -45,7 +45,7 @@ no presence, and registers no tools.
 | Step | State |
 |---|---|
 | 1. Protocol + local broker | done |
-| 2. Worker presence, LWT, orchestrator registry (`/workers`, `list_workers`) | done, verified |
+| 2. Worker presence, LWT, orchestrator registry (`/mqtt status`, `list_workers`) | done, verified |
 | 3. `dispatch_task` → worker run → result → `get_result` | done, verified |
 | 4. `notify: wake`, digest coalescing, cancel, `/tasks`, `list_tasks` | done, verified — timeout and cost cap implemented, not exercised end to end |
 | 4b. `dispatch_task` waits for the result by default; duplicate-id guard | done, verified |
@@ -125,8 +125,11 @@ PI_MQTT_URL=mqtt://127.0.0.1:1883 \
   pi --extension ./extensions/mqtt.ts --pi-mqtt-role orchestrator
 
 # then, in the orchestrator session
-/workers
+/mqtt start
 ```
+
+`/mqtt status` reports the local state and the whole roster (workers and
+orchestrators) in one table.
 
 A session with no `--pi-mqtt-role` (or no broker URL) stays completely inert: no
 socket, no tools, no presence.
@@ -155,7 +158,7 @@ other session obeys by disconnecting itself. The sender stays. Since a room is o
 password, any member can do this — the password is the capability, and the kick is
 cooperative, not enforced by the broker.
 
-Commands: `/workers` (the peer table), `/tasks` (dispatched tasks), `/mqtt config`
+Commands: `/tasks` (dispatched tasks), `/mqtt config`
 (interactive editor) and `/mqtt` — bare or `/mqtt status` for local state and counts,
 `/mqtt start` / `/mqtt stop` / `/mqtt restart` to connect and disconnect.
 
@@ -252,8 +255,7 @@ which stops with `session "x" was taken over by another session`. Because the id
 the pi session name, a worker you pin tasks to should keep a stable session name.
 
 Orchestrators announce themselves on `pi/v1/<room>/orchestrators/<id>/presence`, so
-you can see who is coordinating: `/mqtt status` lists them and `/workers` prints a separate
-ORCHESTRATORS table. They are a different topic from workers by design, so nothing can
+you can see who is coordinating: `/mqtt status` lists them and `/mqtt status` shows the roster. They are a different topic from workers by design, so nothing can
 dispatch a task to one. The id is the session name (`pi --name demo`), else the hostname.
 
 Because the client id is `<room>-<worker-id>`, the broker permits one live session per

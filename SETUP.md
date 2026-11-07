@@ -143,7 +143,7 @@ pi --pi-mqtt-start
 
 In the TUI, `/mqtt status` reports the role, session name, broker, room,
 `state: connected`, how many workers are online, and which orchestrators are in the room.
-From an orchestrator, `/workers` prints both tables. Check from the orchestrator too — `rpi5`-style ids
+From an orchestrator, `/mqtt status` prints both tables. Check from the orchestrator too — `rpi5`-style ids
 appear in the worker list.
 
 Start it from the directory tasks should run in: a worker's working directory is
@@ -158,7 +158,7 @@ which workers are available?
 ask worker-1 what time it is
 ```
 
-`/workers` lists the same thing; `/tasks` shows dispatched tasks and their states.
+`/mqtt status` lists the same thing; `/tasks` shows dispatched tasks and their states.
 
 ---
 
@@ -184,7 +184,7 @@ worker is idle), `timeoutMs`, `maxCostUsd`, `repo: { baseSha | baseRef, branch }
 
 | Symptom | Cause and fix |
 |---|---|
-| Nothing happens, no tools, no `/workers` | Not connected. Run `/mqtt start` (connecting is explicit; `--pi-mqtt-start` or `"connect": "auto"` connects at launch) |
+| Nothing happens, no tools, no `/mqtt status` | Not connected. Run `/mqtt start` (connecting is explicit; `--pi-mqtt-start` or `"connect": "auto"` connects at launch) |
 | Nothing happens, and `/mqtt` says "not configured" | No role. Add `"role"` to the config, or pass `--pi-mqtt-role` |
 | `pi-mqtt inactive: no broker url` | No `broker.url` in the file and no `PI_MQTT_URL` |
 | `pi-mqtt: cannot reach wss://…: self-signed certificate` | Broker uses a private CA: set `mqtt.caFile` to its PEM bundle |
@@ -193,7 +193,7 @@ worker is idle), `timeoutMs`, `maxCostUsd`, `repo: { baseSha | baseRef, branch }
 | `dispatch failed: worker "x" is busy with …` | One run at a time per worker. Use `ifBusy: "wait"` or another worker |
 | Presence appears, but dispatched tasks fail with auth/model errors | The **worker** needs its own model credentials (`pi` → `/login`). The broker being reachable does not give it a model |
 | Task result says `busy with …` | A second task arrived while one ran; it was rejected rather than queued |
-| `/workers` empty on the orchestrator but the worker is running | Different room name or password, so they are in different namespaces |
+| The roster empty on the orchestrator but the worker is running | Different room name or password, so they are in different namespaces |
 
 Permission problems on the broker side — a worker that cannot read its own tasks,
 or can read someone else's — are covered in

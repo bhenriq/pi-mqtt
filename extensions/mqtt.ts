@@ -870,17 +870,6 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	pi.registerCommand("workers", {
-		description: "Show pi-mqtt workers and their state",
-		handler: async (_args, ctx) => {
-			if (!runtime?.orchestrator) {
-				ctx.ui.notify(inactiveReason(), "warning");
-				return;
-			}
-			ctx.ui.notify(runtime.orchestrator.combinedTable(), "info");
-		},
-	});
-
 	pi.registerCommand("tasks", {
 		description: "Show pi-mqtt tasks dispatched in this session",
 		handler: async (_args, ctx) => {
