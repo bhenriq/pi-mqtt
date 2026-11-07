@@ -163,11 +163,11 @@ enforced by the broker.
 Typing `/mqtt ` offers the subcommands as completions (`/mqtt con` → `config`, `connect`), by
 stacking a small provider on the editor's built-in one.
 
-Commands: `/mqtt config`
+Commands: `/mqtt status`
 (interactive editor) and `/mqtt` — bare or `/mqtt status` for local state and counts,
 `/mqtt workers`, `/mqtt tasks`, and `/mqtt connect` / `/mqtt disconnect`.
 
-`/mqtt config` edits `~/.pi/agent/pi-mqtt.json` (or the project file, or
+`/mqtt status` edits `~/.pi/agent/pi-mqtt.json` (or the project file, or
 `--pi-mqtt-config`) without hand-editing JSON: role, broker, room, room password
 (masked in the TUI), connect mode, worker id, and an advanced submenu. It
 validates as you type, can **test the connection** before saving, shows which values

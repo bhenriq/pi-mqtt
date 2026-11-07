@@ -64,10 +64,8 @@ environment variable.
 chmod 600 ~/.pi/agent/pi-mqtt.json    # it holds the room password
 ```
 
-Prefer not to hand-edit? `/mqtt config` in a session opens a menu that writes this
-file for you: role, name, broker, room name, room password (masked), connect mode, plus a
-**Test connection** action and an advanced submenu. It writes the current structure and
-reconnects on save.
+`/mqtt status` in a session prints what the file resolved to — role, name, session id, broker,
+room, connect mode and auth style — which is usually faster than re-reading the file.
 
 ### An orchestrator (the session you type into)
 

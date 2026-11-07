@@ -13,7 +13,6 @@ export interface Subcommand {
 
 export const MQTT_SUBCOMMANDS: Subcommand[] = [
 	{ name: "status", description: "local state, counts, and who is coordinating" },
-	{ name: "config", description: "edit room, password and name" },
 	{ name: "workers", description: "the roster: workers and orchestrators" },
 	{ name: "tasks", description: "tasks dispatched in this session" },
 	{ name: "connect", description: "join the room" },

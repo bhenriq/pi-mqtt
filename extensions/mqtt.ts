@@ -22,7 +22,6 @@ import {
 	type AppConfig,
 	type RawConfig,
 } from "../src/config.ts";
-import { runConfigMenu, type Draft } from "../src/menu.ts";
 import { readGitInfo } from "../src/git.ts";
 import { MqttLink, type LogFn } from "../src/mqtt.ts";
 import { Orchestrator, type TaskRecord } from "../src/orchestrator.ts";
@@ -401,11 +400,13 @@ function statusText(): string {
 	const { config, topics } = session;
 	const lines = [
 		`role:    ${config.role}`,
+		`name:    ${config.worker.name ?? `${config.worker.workerId} (hostname)`}`,
 		`session: ${api?.getSessionName() ?? "(unnamed)"}`,
 		`session id: ${runtime ? runtime.config.worker.workerId : "(not joined)"}`,
 		`broker:  ${config.mqtt.url} (MQTT ${config.mqtt.protocolVersion})`,
 		`room:    ${config.mqtt.cluster}`,
 		`topics:  ${topics.base}`,
+		`connect: ${config.connect}`,
 	];
 
 	if (!runtime) {
@@ -520,167 +521,6 @@ function inactiveReason(): string {
 	if (!session) return "pi-mqtt is not configured in this session (no role or broker). See SETUP.md.";
 	if (!runtime) return "pi-mqtt is not connected — run /mqtt connect (or launch with --pi-mqtt-start).";
 	return "pi-mqtt is not active as an orchestrator in this session.";
-}
-
-function draftFromConfig(config: AppConfig | undefined): Draft {
-	const draft: Draft = { mqtt: {}, worker: {} };
-	if (!config) return draft;
-	draft.role = config.role;
-	draft.connect = config.connect;
-	draft.room = config.mqtt.cluster;
-	draft.roomPassword = config.mqtt.token;
-	draft.mqtt.url = config.mqtt.url;
-	draft.mqtt.cluster = config.mqtt.cluster;
-	draft.mqtt.username = config.mqtt.username;
-	draft.mqtt.password = config.mqtt.password;
-	draft.mqtt.token = config.mqtt.token;
-	draft.mqtt.caFile = config.mqtt.caFile;
-	draft.mqtt.keepaliveSec = config.mqtt.keepaliveSec;
-	draft.mqtt.reconnectMs = config.mqtt.reconnectMs;
-	draft.mqtt.protocolVersion = config.mqtt.protocolVersion;
-	draft.mqtt.rejectUnauthorized = config.mqtt.rejectUnauthorized;
-	draft.worker.workerId = config.worker.workerId;
-	draft.worker.name = config.worker.name;
-	draft.worker.heartbeatMs = config.worker.heartbeatMs;
-	draft.worker.taskExpirySec = config.worker.taskExpirySec;
-	draft.worker.allowModelOverride = config.worker.allowModelOverride;
-	// logDir is only written when the user edits it.
-	return draft;
-}
-
-/**
- * Serialise the draft into the on-disk structure: identity (`role`, `name`, `id`),
- * membership (`room`), transport (`broker`), behaviour (`worker`). Legacy keys that the
- * loader still accepts are removed on save, so editing through the menu migrates a file.
- */
-function mergeDraft(raw: RawConfig, draft: Draft): RawConfig {
-	const out: RawConfig = { ...raw };
-	delete out.roomPassword;
-	delete out.mqtt;
-
-	if (draft.role !== undefined) out.role = draft.role;
-	if (draft.connect !== undefined) out.connect = draft.connect;
-	if (draft.logDir !== undefined) out.logDir = draft.logDir;
-
-	const existingName = typeof out.name === "string" ? out.name : undefined;
-	const name = draft.worker.name ?? existingName;
-	if (name) out.name = name;
-
-	const existingRoom: Record<string, unknown> =
-		typeof out.room === "object" && out.room !== null ? { ...(out.room as Record<string, unknown>) } : {};
-	const previousRoomName =
-		typeof out.room === "string"
-			? out.room
-			: typeof existingRoom.name === "string"
-				? existingRoom.name
-				: undefined;
-	const roomName = draft.room ?? previousRoomName;
-	const roomPassword =
-		draft.roomPassword ?? (typeof existingRoom.password === "string" ? existingRoom.password : undefined);
-	const room: Record<string, unknown> = {};
-	if (roomName) room.name = roomName;
-	if (roomPassword) room.password = roomPassword;
-	if (Object.keys(room).length > 0) out.room = room;
-
-	const existingBroker =
-		typeof out.broker === "object" && out.broker !== null ? (out.broker as Record<string, unknown>) : {};
-	const broker: Record<string, unknown> = { ...existingBroker };
-	if (typeof out.broker === "string") broker.url = out.broker;
-	const mqtt = draft.mqtt as Record<string, unknown>;
-	const brokerDefaults: Record<string, unknown> = {
-		keepaliveSec: 15,
-		reconnectMs: 2000,
-		protocolVersion: 5,
-		rejectUnauthorized: true,
-	};
-	for (const key of ["url", "caFile", "keepaliveSec", "reconnectMs", "protocolVersion", "rejectUnauthorized"]) {
-		const value = mqtt[key];
-		if (value === undefined || value === brokerDefaults[key]) continue;
-		broker[key] = value;
-	}
-	if (Object.keys(broker).length > 0) out.broker = broker;
-
-	// Defaults are not written: a config should say what is unusual about this machine.
-	const workerDefaults: Record<string, unknown> = {
-		heartbeatMs: 30000,
-		taskExpirySec: 900,
-		allowModelOverride: false,
-	};
-	const worker: Record<string, unknown> = {};
-	for (const key of ["heartbeatMs", "taskExpirySec", "allowModelOverride", "repos", "defaultRepo"]) {
-		const value = (draft.worker as Record<string, unknown>)[key];
-		if (value === undefined || value === workerDefaults[key]) continue;
-		worker[key] = value;
-	}
-	const existingWorker =
-		typeof out.worker === "object" && out.worker !== null ? (out.worker as Record<string, unknown>) : {};
-	for (const [key, value] of Object.entries(existingWorker)) {
-		if (worker[key] === undefined && !["name", "workerId"].includes(key)) worker[key] = value;
-	}
-	if (Object.keys(worker).length > 0) out.worker = worker;
-	else delete out.worker;
-
-	// Stable order: identity, membership, transport, behaviour, then anything unknown.
-	const ordered: RawConfig = {};
-	for (const key of ["role", "name", "id", "room", "broker", "worker", "connect", "logDir"]) {
-		if (out[key] !== undefined) ordered[key] = out[key];
-	}
-	for (const [key, value] of Object.entries(out)) {
-		if (ordered[key] === undefined) ordered[key] = value;
-	}
-	return ordered;
-}
-
-function buildMenu(pi: ExtensionAPI, ctx: ExtensionContext) {
-	const explicit = pi.getFlag(FLAG_CONFIG) as string | undefined;
-	const info = resolveConfigPath({ ...(explicit ? { explicit } : {}), cwd: ctx.cwd });
-	const raw = readConfigObject(info.path);
-	const draft = draftFromConfig(session?.config);
-
-	return {
-		ctx,
-		path: info.path,
-		pathOrigin: info.origin,
-		draft,
-		raw,
-		log: (message: string) => session?.log("info", message),
-		busy: () =>
-			(runtime?.orchestrator?.outstanding() ?? []).some((record) => record.state === "running") ||
-			runtime?.presence?.state === "busy",
-		test: async (candidate: Draft): Promise<string | null> => {
-			const temporary = join(tmpdir(), `pi-mqtt-config-${process.pid}.json`);
-			try {
-				writeFileSync(temporary, JSON.stringify(mergeDraft(raw, candidate), null, 2), { mode: 0o600 });
-				const loaded = loadConfig({ configPath: temporary, cwd: ctx.cwd });
-				if (!loaded.ok) return loaded.reason;
-				const link = new MqttLink(loaded.config.mqtt, { clientId: `pi-mqtt-configtest-${Math.random().toString(36).slice(2, 8)}`, log: () => {} });
-				try {
-					await link.connect();
-				} catch (error) {
-					return (error as Error).message;
-				}
-				await link.close();
-				return null;
-			} finally {
-				try {
-					rmSync(temporary, { force: true });
-				} catch {
-					// best effort
-				}
-			}
-		},
-		save: async (candidate: Draft, current: RawConfig): Promise<string> => {
-			writeConfigObject(info.path, mergeDraft(current, candidate));
-			return `saved ${info.path} (${info.origin}); mode 600`;
-		},
-		apply: async () => {
-			const wasConnected = Boolean(runtime);
-			await disconnectRuntime();
-			session = undefined;
-			await prepareSession(pi, ctx);
-			if (wasConnected && session) await connectRuntime(pi, ctx);
-		},
-	};
 }
 
 export default function (pi: ExtensionAPI) {
@@ -914,14 +754,10 @@ export default function (pi: ExtensionAPI) {
 
 	pi.registerCommand("mqtt", {
 		description:
-			"pi-mqtt: /mqtt config, status, workers, tasks, connect, disconnect, kick",
+			"pi-mqtt: /mqtt status, workers, tasks, connect, disconnect, kick",
 		handler: async (args, ctx) => {
 			const arg = args.trim().toLowerCase();
 
-			if (arg === "config") {
-				await runConfigMenu(buildMenu(pi, ctx));
-				return;
-			}
 			if (arg === "status") {
 				ctx.ui.notify(statusText(), "info");
 				return;
@@ -1003,7 +839,7 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 			if (arg) {
-				ctx.ui.notify("usage: /mqtt [status|config|workers|tasks|connect|disconnect|kick]", "warning");
+				ctx.ui.notify("usage: /mqtt [status|workers|tasks|connect|disconnect|kick]", "warning");
 				return;
 			}
 
