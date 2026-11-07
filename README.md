@@ -153,10 +153,11 @@ Orchestrator tools (active only in an orchestrator session):
 | `list_tasks` | Task states: queued, sent, running, done, timeout, cancelled, lost |
 | `cancel_task` | Cooperative abort; the worker reports partial output |
 
-`/mqtt kick [reason]` evicts everyone else: it publishes a room-wide message that every
-other session obeys by disconnecting itself. The sender stays. Since a room is one shared
-password, any member can do this — the password is the capability, and the kick is
-cooperative, not enforced by the broker.
+`/mqtt kick [reason]` says goodbye to everyone: it publishes a room-wide message that every
+other session obeys by disconnecting itself, then clears the roster — including entries for
+sessions that died long ago. The sender stays. Since a room is one shared password, any
+member can do this: the password is the capability, and the kick is cooperative, not
+enforced by the broker.
 
 Commands: `/tasks` (dispatched tasks), `/mqtt config`
 (interactive editor) and `/mqtt` — bare or `/mqtt status` for local state and counts,
