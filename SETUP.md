@@ -94,7 +94,7 @@ the id is `<name>_<pi session name>` (`prudential_billing`) — for workers and 
 alike. That makes naming the pi session mandatory: `pi --name billing`, or `/name billing`
 then `/mqtt start`. An unnamed session cannot join and says so. There is no renaming either:
 a second session deriving the same id takes the first one's place, and the evicted session
-stops. Set `id` in the file (or pass `--pi-mqtt-id`) for an exact id.
+stops. There is no id override: the id is always `<name>_<pi session name>`.
 
 ### Why these values
 
@@ -102,7 +102,7 @@ stops. Set `id` in the file (or pass `--pi-mqtt-id`) for an exact id.
 |---|---|
 | `role` | `worker` or `orchestrator`. Without it (here, in `PI_MQTT_ROLE`, or via `--pi-mqtt-role`) the extension stays inert |
 | `name` | This machine's name: the base for the session id. Defaults to the hostname |
-| `id` | Optional exact session id. Overrides the derived `<name>_<session>` |
+
 | `broker.url` | The scheme picks the transport: `wss://` (TLS WebSocket, usual for a hosted broker), `mqtts://` (TLS on a raw port), `mqtt://`/`ws://` (plain, local only) |
 | `room.name` | The room — also the topic prefix. Everyone who should see each other must share it |
 | `room.password` | The room's shared password. Anyone holding it can join the room |
@@ -118,7 +118,7 @@ stops. Set `id` in the file (or pass `--pi-mqtt-id`) for an exact id.
 Environment overrides the file, and CLI flags override both:
 `PI_MQTT_ROLE`, `PI_MQTT_URL`, `PI_MQTT_CLUSTER`, `PI_MQTT_USERNAME`,
 `PI_MQTT_PASSWORD`, `PI_MQTT_WORKER_ID`, `PI_MQTT_CA_FILE`,
-`PI_MQTT_REJECT_UNAUTHORIZED=0`; flags `--pi-mqtt-role`, `--pi-mqtt-id`,
+`PI_MQTT_REJECT_UNAUTHORIZED=0`; flags `--pi-mqtt-role`,
 `--pi-mqtt-config`.
 
 ---

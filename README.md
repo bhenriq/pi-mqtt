@@ -26,7 +26,7 @@ pi -e ./
 Then start sessions with a role:
 
 ```bash
-pi --pi-mqtt-role worker --pi-mqtt-id worker-1
+pi --pi-mqtt-role worker --name my-session
 pi --pi-mqtt-role orchestrator
 ```
 
@@ -118,7 +118,7 @@ Two sessions in the same room:
 ```bash
 # worker
 PI_MQTT_URL=mqtt://127.0.0.1:1883 \
-  pi --extension ./extensions/mqtt.ts --pi-mqtt-role worker --pi-mqtt-id lap-b
+  pi --extension ./extensions/mqtt.ts --pi-mqtt-role worker --name lap-b
 
 # orchestrator (another terminal)
 PI_MQTT_URL=mqtt://127.0.0.1:1883 \
@@ -229,8 +229,8 @@ password), `broker` (where it lives), and optional `worker` (behaviour such as
 `name` is the machine's stable base name. The session id is `<name>_<pi session name>`
 (`prudential_billing`) — so the pi session must be named to join: `pi --name billing`, or
 `/name billing` before `/mqtt start`. An unnamed session is refused rather than being
-given a generated id. `id` in the file (or `--pi-mqtt-id`) states an exact id and skips
-the requirement. Without `name`, the computer name is the base.
+given a generated id — there is no override: an id is a function of the machine name and
+the pi session name, nothing else. Without `name`, the computer name is the base.
 
 An orchestrator is the same file with `"role": "orchestrator"`.
 
@@ -248,9 +248,8 @@ The **session id** is declared, not authenticated, and it is per *session*: seve
 sessions can join from one host, and nothing is asked beyond naming the pi session: the id
 is `<name>_<session name>` for workers *and* orchestrators. **Collisions are resolved by
 takeover, not by renaming** — a second session deriving the same id evicts the first,
-which stops with `worker id "x" was taken over by another session`. Set `id` in the file
-(or pass `--pi-mqtt-id`) to state an exact id instead; that is the form to use for a
-worker you pin tasks to.
+which stops with `session "x" was taken over by another session`. Because the id includes
+the pi session name, a worker you pin tasks to should keep a stable session name.
 
 Orchestrators announce themselves on `pi/v1/<room>/orchestrators/<id>/presence`, so
 you can see who is coordinating: `/mqtt status` lists them and `/workers` prints a separate
@@ -275,7 +274,7 @@ CLI flag > environment > `pi-mqtt.json`.
 | broker url | — | `PI_MQTT_URL` |
 | room | — | `PI_MQTT_ROOM` |
 | room password | — | `PI_MQTT_ROOM_PASSWORD` |
-| worker id | `--pi-mqtt-id` | `PI_MQTT_WORKER_ID` |
+| worker name | — | — (file only: `name`) |
 | config path | `--pi-mqtt-config` | — |
 | CA bundle | — | `PI_MQTT_CA_FILE` |
 | skip TLS verify | — | `PI_MQTT_REJECT_UNAUTHORIZED=0` (debugging only) |

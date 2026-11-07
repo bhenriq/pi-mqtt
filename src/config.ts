@@ -30,8 +30,6 @@ export interface WorkerConfig {
 	workerId: string;
 	/** Stable base for the session id: `<name>_<session>`. */
 	name?: string;
-	/** True when an id was configured rather than derived from the hostname. */
-	explicitId: boolean;
 	/** Allowlisted repo name -> local path. Never taken from the broker. */
 	repos: Record<string, string>;
 	defaultRepo?: string;
@@ -100,8 +98,6 @@ interface FileShape {
 	connect?: string;
 	/** This machine's name: base for worker ids. */
 	name?: string;
-	/** Exact session id. Wins over everything derived. */
-	id?: string;
 	room?: string | RoomShape;
 	broker?: string | BrokerShape;
 	worker?: Partial<WorkerConfig>;
@@ -289,14 +285,7 @@ export function loadConfig(options: LoadOptions): LoadResult {
 	const configuredUsername = tidy(env.PI_MQTT_USERNAME) ?? tidy(file?.mqtt?.username);
 	const username = token ? (configuredUsername ?? "cluster") : configuredUsername;
 	const name = tidy(file?.name) ?? tidy(file?.worker?.name);
-	const explicitId = [
-		tidy(options.workerId),
-		tidy(env.PI_MQTT_WORKER_ID),
-		tidy(file?.id),
-		tidy(file?.worker?.workerId),
-		role === "worker" ? configuredUsername : undefined,
-	].find((candidate) => candidate !== undefined);
-	const workerId = explicitId ?? defaultWorkerId();
+	const workerId = name ?? tidy(file?.worker?.workerId) ?? defaultWorkerId();
 	if (!isValidIdentifier(workerId)) {
 		return {
 			ok: false,
@@ -338,7 +327,6 @@ export function loadConfig(options: LoadOptions): LoadResult {
 			worker: {
 				workerId,
 				name,
-				explicitId: explicitId !== undefined,
 				repos: file?.worker?.repos ?? {},
 				defaultRepo: file?.worker?.defaultRepo,
 				allowModelOverride: file?.worker?.allowModelOverride ?? false,

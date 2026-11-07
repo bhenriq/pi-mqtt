@@ -30,7 +30,6 @@ import { isKickMessage, topicsFor, type Topics } from "../src/protocol.ts";
 import { Worker } from "../src/worker.ts";
 
 const FLAG_ROLE = "pi-mqtt-role";
-const FLAG_ID = "pi-mqtt-id";
 const FLAG_CONFIG = "pi-mqtt-config";
 const FLAG_FORCE = "pi-mqtt-force";
 const FLAG_START = "pi-mqtt-start";
@@ -193,12 +192,10 @@ function autoStartRequested(pi: ExtensionAPI, config: AppConfig): boolean {
 /** Read the config and remember it. Connecting is a separate, explicit step. */
 async function prepareSession(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
 	const role = (pi.getFlag(FLAG_ROLE) as string | undefined) ?? process.env.PI_MQTT_ROLE;
-	const workerId = pi.getFlag(FLAG_ID) as string | undefined;
 	const configPath = pi.getFlag(FLAG_CONFIG) as string | undefined;
 
 	const loaded = loadConfig({
 		role,
-		...(workerId ? { workerId } : {}),
 		...(configPath ? { configPath } : {}),
 		cwd: ctx.cwd,
 	});
@@ -248,7 +245,7 @@ async function connectRuntime(
 	const chosen = resolveSessionId(pi, config);
 	if (!chosen) {
 		ctx.ui.notify(
-			'pi-mqtt: this session has no name. Run /name <name> (or start pi with --name <name>), then /mqtt start. Or set an exact id with --pi-mqtt-id / "id" in pi-mqtt.json.',
+			"pi-mqtt: this session has no name. Name it first — /name <name>, or start pi with --name <name> — then /mqtt start.",
 			"error",
 		);
 		return false;
@@ -298,7 +295,7 @@ async function connectRuntime(
 			await link.close();
 			const age = Math.round((Date.now() - existing.updatedAt) / 1000);
 			ctx.ui.notify(
-				`pi-mqtt: worker id "${config.worker.workerId}" is already live on ${existing.host} (${existing.cwd}, heartbeat ${age}s ago). Use another --pi-mqtt-id, or --pi-mqtt-force to take it over.`,
+				`pi-mqtt: session "${config.worker.workerId}" is already live on ${existing.host} (${existing.cwd}, heartbeat ${age}s ago). Rename this pi session, or pass --pi-mqtt-force to take it over.`,
 				"error",
 			);
 			return false;
@@ -343,7 +340,7 @@ async function connectRuntime(
 		link.onTakenOver = () => {
 			void disconnectRuntime();
 			ctx.ui.notify(
-				`pi-mqtt: session "${config.worker.workerId}" was taken over by another session; this one stopped. Rename the pi session, or set an exact id with --pi-mqtt-id.`,
+				`pi-mqtt: session "${config.worker.workerId}" was taken over by another session; this one stopped. Rename this pi session if that was not intended.`,
 				"error",
 			);
 		};
@@ -469,20 +466,17 @@ function sanitizeId(value: string): string {
  * suffixed (-2, -3, …) rather than refused: several sessions may join from one host.
  */
 /**
- * The session's identity in the room: `<name>_<pi session name>`.
+ * The session's identity in the room: `<worker name>_<pi session name>`, always.
  *
- * Naming the pi session is the price of joining: without `--name` or `/name` there is no
- * identity to use, and two unnamed windows on one machine would collide by definition.
- * An explicitly configured id (--pi-mqtt-id, or `id` in the file) is taken as that name
- * and skips the requirement. Returns undefined when the session cannot join.
+ * Both halves are required: the name comes from the config file (else the computer name),
+ * and the session half is the pi session name, so naming the pi session is the price of
+ * joining. There is no override — an id is a function of who this machine is and which pi
+ * session asked, which is what makes the roster readable.
  */
 function resolveSessionId(pi: ExtensionAPI, config: AppConfig): string | undefined {
-	if (config.worker.explicitId) return config.worker.workerId;
 	if (sessionWorkerId) return sessionWorkerId;
-
 	const named = sanitizeId(pi.getSessionName() ?? "");
 	if (!named) return undefined;
-
 	const base = sanitizeId(config.worker.name ?? "") || config.worker.workerId;
 	return `${base}_${named}`;
 }
@@ -499,7 +493,6 @@ function draftFromConfig(config: AppConfig | undefined): Draft {
 	if (!config) return draft;
 	draft.role = config.role;
 	draft.connect = config.connect;
-	draft.id = config.worker.explicitId ? config.worker.workerId : undefined;
 	draft.room = config.mqtt.cluster;
 	draft.roomPassword = config.mqtt.token;
 	draft.mqtt.url = config.mqtt.url;
@@ -533,10 +526,6 @@ function mergeDraft(raw: RawConfig, draft: Draft): RawConfig {
 
 	if (draft.role !== undefined) out.role = draft.role;
 	if (draft.connect !== undefined) out.connect = draft.connect;
-	if (draft.id !== undefined) {
-		if (draft.id) out.id = draft.id;
-		else delete out.id;
-	}
 	if (draft.logDir !== undefined) out.logDir = draft.logDir;
 
 	const existingName = typeof out.name === "string" ? out.name : undefined;
@@ -662,7 +651,6 @@ function buildMenu(pi: ExtensionAPI, ctx: ExtensionContext) {
 
 export default function (pi: ExtensionAPI) {
 	pi.registerFlag(FLAG_ROLE, { description: "pi-mqtt role: orchestrator | worker", type: "string" });
-	pi.registerFlag(FLAG_ID, { description: "pi-mqtt worker id (defaults to hostname)", type: "string" });
 	pi.registerFlag(FLAG_CONFIG, { description: "path to pi-mqtt.json", type: "string" });
 	pi.registerFlag(FLAG_FORCE, {
 		description: "start even if another live session is already using this worker id",
