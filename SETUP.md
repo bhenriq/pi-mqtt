@@ -158,7 +158,7 @@ which workers are available?
 ask worker-1 what time it is
 ```
 
-`/mqtt status` lists the same thing; `/tasks` shows dispatched tasks and their states.
+`/mqtt workers` prints the roster; `/mqtt tasks` shows dispatched tasks and their states.
 
 ---
 

@@ -444,7 +444,7 @@ function statusText(): string {
 		lines.push(
 			`orchestrators: ${others.length === 0 ? "none in the room" : others.map((entry) => entry.presence.workerId).join(", ")}`,
 		);
-		lines.push("", orchestrator.combinedTable());
+		lines.push("roster:  /mqtt workers for the table");
 	} else {
 		const presence = runtime.worker;
 		lines.push(presence ? `worker:  idle, listening for tasks` : "worker:  idle");
@@ -912,20 +912,9 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	pi.registerCommand("tasks", {
-		description: "Show pi-mqtt tasks dispatched in this session",
-		handler: async (_args, ctx) => {
-			if (!runtime?.orchestrator) {
-				ctx.ui.notify(inactiveReason(), "warning");
-				return;
-			}
-			ctx.ui.notify(runtime.orchestrator.taskTable(), "info");
-		},
-	});
-
 	pi.registerCommand("mqtt", {
 		description:
-			"pi-mqtt: /mqtt config, status, connect, disconnect, reconnect, kick",
+			"pi-mqtt: /mqtt config, status, workers, tasks, connect, disconnect, kick",
 		handler: async (args, ctx) => {
 			const arg = args.trim().toLowerCase();
 
@@ -992,13 +981,29 @@ export default function (pi: ExtensionAPI) {
 				ctx.ui.notify("pi-mqtt disconnected.", "info");
 				return;
 			}
-			if (arg === "reconnect") {
-				await disconnectRuntime();
-				await connectRuntime(pi, ctx);
+			if (arg.startsWith("workers")) {
+				if (!runtime) {
+					ctx.ui.notify("pi-mqtt is not connected.", "info");
+					return;
+				}
+				if (!runtime.orchestrator) {
+					ctx.ui.notify("pi-mqtt: the roster is only visible from an orchestrator.", "info");
+					return;
+				}
+				ctx.ui.notify(runtime.orchestrator.combinedTable(), "info");
+				return;
+			}
+
+			if (arg.startsWith("tasks")) {
+				if (!runtime?.orchestrator) {
+					ctx.ui.notify("pi-mqtt: tasks are only visible from an orchestrator.", "info");
+					return;
+				}
+				ctx.ui.notify(runtime.orchestrator.taskTable(), "info");
 				return;
 			}
 			if (arg) {
-				ctx.ui.notify("usage: /mqtt [status|config|connect|disconnect|reconnect|kick]", "warning");
+				ctx.ui.notify("usage: /mqtt [status|config|workers|tasks|connect|disconnect|kick]", "warning");
 				return;
 			}
 
