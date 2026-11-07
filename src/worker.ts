@@ -67,6 +67,7 @@ export class Worker {
 
 		this.unsubscribes.push(
 			this.link.subscribe(controlTopic, (_topic, payload) => {
+				if (payload === undefined) return;
 				if (!isControlMessage(payload)) {
 					log("warn", `ignoring malformed control message on ${controlTopic}`);
 					return;

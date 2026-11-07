@@ -89,6 +89,12 @@ function clip(value: string, width: number): string {
 }
 
 export class Orchestrator {
+	/** `/workers/<id>/presence` etc, to drop a registry entry when it is deleted. */
+	private static idFromPresenceTopic(topic: string): string | undefined {
+		const match = topic.match(/\/(?:workers|orchestrators)\/([^/]+)\/presence$/);
+		return match?.[1];
+	}
+
 	private readonly workers = new Map<string, PresenceMessage>();
 	private readonly orchestrators = new Map<string, PresenceMessage>();
 	private readonly tasks = new Map<string, TaskRecord>();
@@ -104,7 +110,12 @@ export class Orchestrator {
 
 	start(): void {
 		this.unsubscribes.push(
-			this.link.subscribe(this.topics.presenceFilter, (_topic, payload) => {
+			this.link.subscribe(this.topics.presenceFilter, (topic, payload) => {
+				if (payload === undefined) {
+					const id = Orchestrator.idFromPresenceTopic(topic);
+					if (id) this.workers.delete(id);
+					return;
+				}
 				if (!isPresenceMessage(payload)) {
 					this.options.log("warn", "ignoring malformed presence message");
 					return;
@@ -112,12 +123,17 @@ export class Orchestrator {
 				this.workers.set(payload.workerId, payload);
 				this.onWorkerState(payload.workerId);
 			}),
-			this.link.subscribe(this.topics.orchestratorFilter, (_topic, payload) => {
+			this.link.subscribe(this.topics.orchestratorFilter, (topic, payload) => {
+				if (payload === undefined) {
+					const id = Orchestrator.idFromPresenceTopic(topic);
+					if (id) this.orchestrators.delete(id);
+					return;
+				}
 				if (!isPresenceMessage(payload)) return;
 				this.orchestrators.set(payload.workerId, payload);
 			}),
 			this.link.subscribe(this.topics.ackFilter, (_topic, payload) => {
-				if (!isAckMessage(payload)) return;
+				if (payload === undefined || !isAckMessage(payload)) return;
 				const record = this.tasks.get(payload.taskId);
 				if (!record) return;
 				record.state = "running";
@@ -125,7 +141,7 @@ export class Orchestrator {
 				this.clearAckTimer(payload.taskId);
 			}),
 			this.link.subscribe(this.topics.resultFilter, (_topic, payload) => {
-				if (!isResultMessage(payload)) {
+				if (payload === undefined || !isResultMessage(payload)) {
 					this.options.log("warn", "ignoring malformed result message");
 					return;
 				}
@@ -277,11 +293,11 @@ export class Orchestrator {
 		return this.list().filter((record) => record.state === "queued" || record.state === "sent" || record.state === "running");
 	}
 
-	orchestratorEntries(): WorkerEntry[] {
+	orchestratorEntries(includeOffline = false): WorkerEntry[] {
 		const now = Date.now();
 		const staleAfter = this.options.heartbeatMs * STALE_FACTOR;
 		return [...this.orchestrators.values()]
-			.filter((presence) => presence.state !== "offline")
+			.filter((presence) => includeOffline || presence.state !== "offline")
 			.map((presence) => {
 				const ageMs = now - presence.updatedAt;
 				return { presence, ageMs, stale: ageMs > staleAfter };

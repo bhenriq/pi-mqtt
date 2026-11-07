@@ -333,12 +333,14 @@ async function connectRuntime(pi: ExtensionAPI, ctx: ExtensionContext): Promise<
 	}
 
 	link.subscribe(topics.roomControl, (_topic, payload) => {
+		if (payload === undefined) return;
 		if (!isKickMessage(payload)) return;
 		if (payload.from === config.worker.workerId) return; // our own message
 		if (!runtime) return;
 		const why = payload.reason ? `: ${payload.reason}` : "";
 		ctx.ui.notify(`pi-mqtt: ${payload.from} removed everyone from the room${why}. Disconnected.`, "warning");
 		if (runtime.config.role === "worker") currentCtx?.abort();
+		runtime.presence?.forget();
 		void disconnectRuntime();
 	});
 
@@ -885,7 +887,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.registerCommand("mqtt", {
 		description:
-			"pi-mqtt: /mqtt config to edit room and password, /mqtt status, start, stop, restart, kick",
+			"pi-mqtt: /mqtt config, status, start, stop, restart, kick, flush",
 		handler: async (args, ctx) => {
 			const arg = args.trim().toLowerCase();
 
@@ -908,14 +910,61 @@ export default function (pi: ExtensionAPI) {
 				}
 				const reason = args.trim().slice(4).trim() || undefined;
 				const from = runtime.config.worker.workerId;
+				const others = [
+					...runtime.orchestrator?.entries().map((entry) => entry.presence.workerId) ?? [],
+					...runtime.orchestrator?.orchestratorEntries().map((entry) => entry.presence.workerId) ?? [],
+				].filter((id) => id !== from);
 				await runtime.link.publish(
 					runtime.topics.roomControl,
 					{ v: 1, kind: "kick", from, at: Date.now(), ...(reason ? { reason } : {}) },
 					{},
 				);
+				// Give the others a moment to disconnect, then clear what they leave behind.
+				const link = runtime.link;
+				const topics = runtime.topics;
+				const purge = [...new Set(others)].flatMap((id) => [
+					topics.presence(id),
+					topics.orchestratorPresence(id),
+				]);
+				setTimeout(() => {
+					void link.deleteRetained(purge).catch(() => {
+						// Entries expire on their own if the purge cannot run.
+					});
+				}, 1500);
 				ctx.ui.notify(
 					`pi-mqtt: asked every other session in the room to leave${reason ? ` (${reason})` : ""}.`,
 					"info",
+				);
+				return;
+			}
+			if (arg.startsWith("flush")) {
+				if (!runtime) {
+					ctx.ui.notify("pi-mqtt is not connected.", "info");
+					return;
+				}
+				const current = runtime;
+				const self = current.config.worker.workerId;
+				const gone = [
+					...current.orchestrator?.entries().filter((entry) => entry.stale || entry.presence.state === "offline") ?? [],
+					...current.orchestrator
+						?.orchestratorEntries(true)
+						.filter((entry) => entry.stale || entry.presence.state === "offline") ?? [],
+				]
+					.map((entry) => entry.presence.workerId)
+					.filter((id) => id !== self);
+				const topicList = [...new Set(gone)].flatMap((id) => [
+					current.topics.presence(id),
+					current.topics.orchestratorPresence(id),
+				]);
+				if (topicList.length === 0) {
+					ctx.ui.notify("pi-mqtt: nothing stale to flush.", "info");
+					return;
+				}
+				ctx.ui.notify(`pi-mqtt: clearing ${topicList.length} retained entries…`, "info");
+				const { ok, failed } = await current.link.deleteRetained(topicList);
+				ctx.ui.notify(
+					`pi-mqtt: cleared ${ok} retained presence entr${ok === 1 ? "y" : "ies"}${failed > 0 ? `, ${failed} failed` : ""}.`,
+					failed > 0 ? "warning" : "info",
 				);
 				return;
 			}
@@ -934,7 +983,7 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 			if (arg) {
-				ctx.ui.notify("usage: /mqtt [status|config|start|stop|restart|kick]", "warning");
+				ctx.ui.notify("usage: /mqtt [status|config|start|stop|restart|kick|flush]", "warning");
 				return;
 			}
 

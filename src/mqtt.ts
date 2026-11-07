@@ -9,6 +9,8 @@ import { connect, type IClientOptions, type IClientPublishOptions, type MqttClie
 import type { MqttConfig } from "./config.ts";
 import { decodePayload, type Json } from "./protocol.ts";
 
+const PUBLISH_TIMEOUT_MS = 4000;
+
 export interface PublishOptions {
 	retain?: boolean;
 	expirySec?: number;
@@ -30,7 +32,8 @@ function describeCloseCode(code: number | undefined): string {
 	return `${code}`;
 }
 
-export type MessageHandler = (topic: string, payload: Json) => void;
+/** `payload` is undefined when a retained message was deleted (zero-length payload). */
+export type MessageHandler = (topic: string, payload: Json | undefined) => void;
 export type LogFn = (level: "info" | "warn" | "error", message: string) => void;
 
 export interface LinkOptions {
@@ -144,8 +147,10 @@ export class MqttLink {
 			if (this.everConnected) options.log("error", `mqtt error: ${error.message}`);
 		});
 		client.on("message", (topic, payload) => {
-			const decoded = decodePayload(payload);
-			if (!decoded) {
+			// A zero-length payload on a retained topic is a deletion, not garbage:
+			// pass it through so registries can drop the entry.
+			const decoded = payload.length === 0 ? undefined : decodePayload(payload);
+			if (decoded === undefined && payload.length > 0) {
 				options.log("warn", `ignoring non-JSON payload on ${topic}`);
 				return;
 			}
@@ -203,11 +208,81 @@ export class MqttLink {
 			publishOptions.properties = { messageExpiryInterval: options.expirySec };
 		}
 		return new Promise((resolve, reject) => {
+			// A publish queued while the socket is down never calls back; do not let a
+			// caller (or a purge loop) hang on it.
+			const timer = setTimeout(() => reject(new Error(`publish to ${topic} timed out`)), PUBLISH_TIMEOUT_MS);
 			client.publish(topic, Buffer.from(JSON.stringify(payload)), publishOptions, (error) => {
+				clearTimeout(timer);
 				if (error) reject(error);
 				else resolve();
 			});
 		});
+	}
+
+	/**
+	 * Delete retained messages, one topic per connection.
+	 *
+	 * A zero-length retained PUBLISH is the only way to delete a retained message, and
+	 * mqtt.js mishandles it: over MQTT 5 mosquitto answers DISCONNECT 130 "protocol
+	 * error", and over MQTT 3.1.1 the first deletion works but the connection closes
+	 * right after it. So: MQTT 3.1.1, and a fresh connection per topic. Deletions are a
+	 * rare, explicit action, so the extra handshakes are acceptable.
+	 */
+	async deleteRetained(topics: string[]): Promise<{ ok: number; failed: number }> {
+		let ok = 0;
+		let failed = 0;
+		for (const topic of topics) {
+			try {
+				await this.deleteOneRetained(topic);
+				ok += 1;
+			} catch {
+				failed += 1;
+			}
+		}
+		return { ok, failed };
+	}
+
+	private async deleteOneRetained(topic: string): Promise<void> {
+		const { config } = this;
+		const client = connect(config.url, {
+			clientId: `pi-mqtt-delete-${Math.random().toString(36).slice(2, 8)}`,
+			protocolVersion: 4,
+			clean: true,
+			reconnectPeriod: 0,
+			connectTimeout: 10_000,
+			username: config.username,
+			password: config.password,
+			rejectUnauthorized: config.rejectUnauthorized,
+			...(config.caFile ? { ca: readFileSync(config.caFile) } : {}),
+		});
+		try {
+			await new Promise<void>((resolve, reject) => {
+				const timer = setTimeout(() => reject(new Error("delete connect timed out")), 10_000);
+				client.once("connect", () => {
+					clearTimeout(timer);
+					resolve();
+				});
+				client.once("error", (error) => {
+					clearTimeout(timer);
+					reject(error);
+				});
+			});
+			await new Promise<void>((resolve, reject) => {
+				const timer = setTimeout(() => reject(new Error("delete publish timed out")), PUBLISH_TIMEOUT_MS);
+				client.publish(topic, "", { qos: 1, retain: true }, (error) => {
+					clearTimeout(timer);
+					if (error) reject(error);
+					else resolve();
+				});
+			});
+		} finally {
+			await new Promise<void>((resolve) => client.end(false, {}, () => resolve()));
+		}
+	}
+
+	async publishEmpty(topic: string): Promise<void> {
+		const { failed } = await this.deleteRetained([topic]);
+		if (failed > 0) throw new Error(`could not delete ${topic}`);
 	}
 
 	async close(): Promise<void> {

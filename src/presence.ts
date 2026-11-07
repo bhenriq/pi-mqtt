@@ -71,7 +71,8 @@ export async function probePresence(
 			resolve(value);
 		};
 		const unsubscribe = link.subscribe(topic, (_topic, payload) => {
-			finish(isPresenceMessage(payload) ? payload : undefined);
+			// A deleted retained presence means "nobody is using this id".
+			finish(payload !== undefined && isPresenceMessage(payload) ? payload : undefined);
 		});
 		const timer = setTimeout(() => finish(undefined), timeoutMs);
 		timer.unref?.();
@@ -112,6 +113,19 @@ export class Presence {
 		if (this.stopped) return;
 		this.current = { ...this.current, ...patch, updatedAt: Date.now() };
 		void this.publish();
+	}
+
+	/**
+	 * Leave the room: delete the retained presence rather than marking it offline, so a
+	 * kicked session disappears from the roster instead of lingering as a corpse.
+	 */
+	forget(): void {
+		if (this.stopped) return;
+		this.stopped = true;
+		if (this.timer) clearInterval(this.timer);
+		void this.link.publishEmpty(this.topic).catch((error: unknown) => {
+			this.log("warn", `could not clear presence: ${(error as Error).message}`);
+		});
 	}
 
 	/** Republish the current state now (used after a reconnect). */
