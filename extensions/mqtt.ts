@@ -211,7 +211,7 @@ async function prepareSession(pi: ExtensionAPI, ctx: ExtensionContext): Promise<
 	session = { config, topics: topicsFor(config.mqtt.cluster), log: makeLog(ctx) };
 
 	if (autoStartRequested(pi, config)) {
-		await connectRuntime(pi, ctx);
+		await connectRuntime(pi, ctx, { auto: true });
 		return;
 	}
 	ctx.ui.notify(
@@ -220,13 +220,28 @@ async function prepareSession(pi: ExtensionAPI, ctx: ExtensionContext): Promise<
 	);
 }
 
-async function connectRuntime(pi: ExtensionAPI, ctx: ExtensionContext): Promise<boolean> {
+async function connectRuntime(
+	pi: ExtensionAPI,
+	ctx: ExtensionContext,
+	options: { auto?: boolean } = {},
+): Promise<boolean> {
 	const current = session;
 	if (!current) {
 		ctx.ui.notify("pi-mqtt is not configured in this session: no role or broker. See SETUP.md.", "warning");
 		return false;
 	}
 	if (runtime) return true;
+
+	// Auto-connect must not invent an identity: an unnamed session that starts itself would
+	// claim whatever id the config implies, and nobody asked it to join. A manual
+	// /mqtt start may use an explicit id, because that is a deliberate act.
+	if (options.auto && !sanitizeId(pi.getSessionName() ?? "")) {
+		ctx.ui.notify(
+			'pi-mqtt: connect is set to "auto" but this session has no name — start pi with --name <name>, or run /mqtt start manually.',
+			"warning",
+		);
+		return false;
+	}
 
 	const { topics, log } = current;
 	let config = current.config;

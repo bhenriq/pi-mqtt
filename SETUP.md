@@ -106,7 +106,7 @@ stops. Set `id` in the file (or pass `--pi-mqtt-id`) for an exact id.
 | `broker.url` | The scheme picks the transport: `wss://` (TLS WebSocket, usual for a hosted broker), `mqtts://` (TLS on a raw port), `mqtt://`/`ws://` (plain, local only) |
 | `room.name` | The room — also the topic prefix. Everyone who should see each other must share it |
 | `room.password` | The room's shared password. Anyone holding it can join the room |
-| `connect` | `"manual"` (default) connects only when you run `/mqtt start`; `"auto"` connects at session start |
+| `connect` | `"manual"` (default) connects only when you run `/mqtt start`; `"auto"` connects at session start, and only for a named session (`pi --name x`) |
 | `worker` | Optional behaviour: `heartbeatMs`, `taskExpirySec`, `allowModelOverride`, `repos` |
 
 ### Where the file is read from
