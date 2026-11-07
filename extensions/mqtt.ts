@@ -230,7 +230,14 @@ async function connectRuntime(pi: ExtensionAPI, ctx: ExtensionContext): Promise<
 
 	const { topics, log } = current;
 	let config = current.config;
-	const chosen = resolveSessionId(pi, ctx, config);
+	const chosen = resolveSessionId(pi, config);
+	if (!chosen) {
+		ctx.ui.notify(
+			'pi-mqtt: this session has no name. Run /name <name> (or start pi with --name <name>), then /mqtt start. Or set an exact id with --pi-mqtt-id / "id" in pi-mqtt.json.',
+			"error",
+		);
+		return false;
+	}
 	sessionWorkerId = chosen;
 	config = { ...config, worker: { ...config.worker, workerId: chosen } };
 	const git = readGitInfo(ctx.cwd);
@@ -447,25 +454,22 @@ function sanitizeId(value: string): string {
  * suffixed (-2, -3, …) rather than refused: several sessions may join from one host.
  */
 /**
- * The session's identity in the room: `<name>_<session>`, derived and never asked for.
+ * The session's identity in the room: `<name>_<pi session name>`.
  *
- * `name` comes from the config file, else the computer name. The session part is the pi
- * session name, or the first four characters of the pi session id when the session is
- * unnamed, so two windows never collide by accident. An explicitly configured id wins
- * outright. There is no suffixing: if two sessions derive the same id, the second takes
- * the first one's place — the broker evicts it, and the evicted session stops.
+ * Naming the pi session is the price of joining: without `--name` or `/name` there is no
+ * identity to use, and two unnamed windows on one machine would collide by definition.
+ * An explicitly configured id (--pi-mqtt-id, or `id` in the file) is taken as that name
+ * and skips the requirement. Returns undefined when the session cannot join.
  */
-function resolveSessionId(pi: ExtensionAPI, ctx: ExtensionContext, config: AppConfig): string {
+function resolveSessionId(pi: ExtensionAPI, config: AppConfig): string | undefined {
 	if (config.worker.explicitId) return config.worker.workerId;
 	if (sessionWorkerId) return sessionWorkerId;
 
-	const base = sanitizeId(config.worker.name ?? "") || config.worker.workerId;
 	const named = sanitizeId(pi.getSessionName() ?? "");
-	const fromSessionId = (ctx.sessionManager.getSessionId() ?? "")
-		.replace(/[^A-Za-z0-9]/g, "")
-		.slice(0, 4)
-		.toLowerCase();
-	return `${base}_${named || fromSessionId || "session"}`;
+	if (!named) return undefined;
+
+	const base = sanitizeId(config.worker.name ?? "") || config.worker.workerId;
+	return `${base}_${named}`;
 }
 
 /** Why a tool or command cannot do its job right now. */

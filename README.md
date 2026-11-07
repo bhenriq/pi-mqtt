@@ -226,10 +226,11 @@ Four groups, one each: `role`/`name` (who this session is), `room` (which room a
 password), `broker` (where it lives), and optional `worker` (behaviour such as
 `heartbeatMs`). Defaults are omitted, so a minimal file stays minimal.
 
-`name` is the machine's stable base name. A worker's session id is derived, never
-typed: `<name>_<pi session name>` (`prudential_billing`). When the pi session is unnamed,
-the first four characters of its session id are used instead (`prudential_01a1`). Without
-`name`, the computer name is the base.
+`name` is the machine's stable base name. The session id is `<name>_<pi session name>`
+(`prudential_billing`) — so the pi session must be named to join: `pi --name billing`, or
+`/name billing` before `/mqtt start`. An unnamed session is refused rather than being
+given a generated id. `id` in the file (or `--pi-mqtt-id`) states an exact id and skips
+the requirement. Without `name`, the computer name is the base.
 
 An orchestrator is the same file with `"role": "orchestrator"`.
 
@@ -244,8 +245,8 @@ means you see each other, anything else and you do not. There are no per-machine
 accounts to create — hand someone the room password and they can join.
 
 The **session id** is declared, not authenticated, and it is per *session*: several
-sessions can join from one host, and nothing is asked: the id is
-`<name>_<session name>` for workers *and* orchestrators. **Collisions are resolved by
+sessions can join from one host, and nothing is asked beyond naming the pi session: the id
+is `<name>_<session name>` for workers *and* orchestrators. **Collisions are resolved by
 takeover, not by renaming** — a second session deriving the same id evicts the first,
 which stops with `worker id "x" was taken over by another session`. Set `id` in the file
 (or pass `--pi-mqtt-id`) to state an exact id instead; that is the form to use for a

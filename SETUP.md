@@ -91,10 +91,10 @@ another session can join.
 
 **The session id is derived and scoped to the session.** `name` is the machine's base, and
 the id is `<name>_<pi session name>` (`prudential_billing`) — for workers and orchestrators
-alike. An unnamed pi session contributes the first four characters of its session id
-(`prudential_01a1`). Nothing prompts, and there is no renaming: a second session deriving
-the same id takes the first one's place, and the evicted session stops. Set `id` in the
-file (or pass `--pi-mqtt-id`) for an exact id — the form to use when tasks are pinned.
+alike. That makes naming the pi session mandatory: `pi --name billing`, or `/name billing`
+then `/mqtt start`. An unnamed session cannot join and says so. There is no renaming either:
+a second session deriving the same id takes the first one's place, and the evicted session
+stops. Set `id` in the file (or pass `--pi-mqtt-id`) for an exact id.
 
 ### Why these values
 
