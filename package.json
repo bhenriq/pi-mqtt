@@ -11,7 +11,7 @@
   ],
   "pi": {
     "extensions": [
-      "./extensions/mqtt.ts"
+      "./extensions/index.ts"
     ]
   },
   "scripts": {

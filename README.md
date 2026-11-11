@@ -118,11 +118,11 @@ Two sessions in the same room:
 ```bash
 # worker
 PI_MQTT_URL=mqtt://127.0.0.1:1883 \
-  pi --extension ./extensions/mqtt.ts --pi-mqtt-role worker --name lap-b
+  pi --extension ./extensions/index.ts --pi-mqtt-role worker --name lap-b
 
 # orchestrator (another terminal)
 PI_MQTT_URL=mqtt://127.0.0.1:1883 \
-  pi --extension ./extensions/mqtt.ts --pi-mqtt-role orchestrator
+  pi --extension ./extensions/index.ts --pi-mqtt-role orchestrator
 
 # then, in the orchestrator session (started with --name main)
 /mqtt connect
