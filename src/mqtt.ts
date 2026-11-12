@@ -162,20 +162,36 @@ export class MqttLink {
 
 		// A failed handshake must not leave a reconnect loop running: the caller
 		// gets one rejection and a closed client, and decides whether to retry.
-		return new Promise((resolve, reject) => {
-			const timer = setTimeout(() => {
+		//
+		// These listeners are removed the moment the handshake settles. Left armed,
+		// the error listener would greet every *later* error — a keepalive timeout
+		// after a sleeping laptop, say — with `end(true)`, which tears the client
+		// down and stops mqtt.js from ever reconnecting: a silently dead link that
+		// still reports itself as configured.
+		return new Promise<void>((resolve, reject) => {
+			let timer: NodeJS.Timeout | undefined;
+			const settle = () => {
+				clearTimeout(timer);
+				timer = undefined;
+				client.off("connect", onConnect);
+				client.off("error", onError);
+			};
+			function onConnect(): void {
+				settle();
+				resolve();
+			}
+			function onError(error: Error): void {
+				settle();
+				client.end(true);
+				reject(error);
+			}
+			timer = setTimeout(() => {
+				settle();
 				client.end(true);
 				reject(new Error(`timeout connecting to ${config.url}`));
 			}, 15_000);
-			client.once("connect", () => {
-				clearTimeout(timer);
-				resolve();
-			});
-			client.once("error", (error) => {
-				clearTimeout(timer);
-				client.end(true);
-				reject(error);
-			});
+			client.on("connect", onConnect);
+			client.on("error", onError);
 		});
 	}
 
