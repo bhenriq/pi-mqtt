@@ -188,6 +188,7 @@ worker is idle), `timeoutMs`, `maxCostUsd`, `repo: { baseSha | baseRef, branch }
 | `pi-mqtt: cannot reach wss://…: self-signed certificate` | Broker uses a private CA: set `mqtt.caFile` to its PEM bundle |
 | `worker id "x" is already live on …` | Two sessions using one id. Stop the old one, use another `-i`/`workerId`, or `--pi-mqtt-force` to take over deliberately |
 | `dispatch failed: worker "x" is offline` | No live session with that id, or its heartbeat is older than 3× `heartbeatMs` |
+| Every worker looks stale and the ages keep climbing, but the workers are fine | **This** session's link to the broker died (laptop sleep, proxy idle timeout). `/mqtt status` says `state: DOWN`; the roster is frozen, not the workers. `/mqtt disconnect` then `/mqtt connect` |
 | `dispatch failed: worker "x" is busy with …` | One run at a time per worker. Use `ifBusy: "wait"` or another worker |
 | Presence appears, but dispatched tasks fail with auth/model errors | The **worker** needs its own model credentials (`pi` → `/login`). The broker being reachable does not give it a model |
 | Task result says `busy with …` | A second task arrived while one ran; it was rejected rather than queued |

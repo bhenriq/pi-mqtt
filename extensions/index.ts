@@ -336,23 +336,27 @@ async function connectRuntime(
 			config.worker.heartbeatMs,
 			log,
 		);
-		// Reconnect: re-announce immediately instead of waiting for the next heartbeat.
-		link.onReconnect = () => presence.republish();
-		// Deterministic client id + broker takeover: the older session yields instead of
-		// reconnecting and evicting the newcomer in a loop.
-		link.onTakenOver = () => {
-			void disconnectRuntime();
-			ctx.ui.notify(
-				`pi-mqtt: session "${config.worker.workerId}" was taken over by another session; this one stopped. Rename this pi session if that was not intended.`,
-				"error",
-			);
-		};
 		presence.start();
 		connected.presence = presence;
 		const worker = new Worker(link, topics, { pi, ctx: () => currentCtx, config, presence, log });
 		worker.start();
 		connected.worker = worker;
 	}
+
+	// Reconnect: re-announce immediately instead of waiting for the next heartbeat.
+	// Both roles need this: an orchestrator whose presence vanished from the broker is
+	// invisible to the other members even though it is alive and dispatching.
+	link.onReconnect = () => connected.presence?.republish();
+	// Deterministic client id + broker takeover: the older session yields instead of
+	// reconnecting and evicting the newcomer in a loop. Silently stopping would leave a
+	// session that looks connected but hears nothing, so say it either way.
+	link.onTakenOver = () => {
+		void disconnectRuntime();
+		ctx.ui.notify(
+			`pi-mqtt: session "${config.worker.workerId}" was taken over by another session; this one stopped. Rename this pi session if that was not intended.`,
+			"error",
+		);
+	};
 
 	link.subscribe(topics.roomControl, (_topic, payload) => {
 		if (payload === undefined) return;
@@ -420,7 +424,9 @@ function statusText(): string {
 		.map((field) => envOverrideFor(field))
 		.filter((name): name is string => Boolean(name));
 	if (fromEnv.length > 0) lines.push(`env:     ${fromEnv.join(", ")} (these win over the file)`);
-	lines.push(`state:   connected (online: ${runtime.link.online})`);
+	const down = linkDownNotice(runtime.link);
+	if (down) lines.push(`state:   DOWN — ${down}; /mqtt disconnect then /mqtt connect to rejoin`);
+	else lines.push("state:   connected");
 	const reconnects = runtime.link.reconnects;
 	if (reconnects > 0) {
 		const last = runtime.link.lastClose;
@@ -524,6 +530,23 @@ function withSubcommandCompletion(current: AutocompleteProvider): AutocompletePr
 	};
 }
 
+/**
+ * Why the roster cannot be trusted: this session's own link to the broker is down.
+ *
+ * Without this, a dead link is indistinguishable from a stalled worker — the retained
+ * presence the session last heard about keeps aging, and every reader concludes the
+ * worker went quiet instead of the socket.
+ */
+function linkDownNotice(link: MqttLink): string | undefined {
+	if (link.online) return undefined;
+	const last = link.lastClose;
+	const when = last ? new Date(last.at).toISOString().slice(11, 19) : "?";
+	const why = last
+		? `${last.source}${last.code !== undefined ? ` ${last.code}` : ""}${last.reason ? ` ${last.reason}` : ""}`
+		: "unknown";
+	return `no link to the broker since ${when} (${why})`;
+}
+
 /** Why a tool or command cannot do its job right now. */
 function inactiveReason(): string {
 	if (!session) return "pi-mqtt is not configured in this session (no role or broker). See SETUP.md.";
@@ -559,8 +582,17 @@ export default function (pi: ExtensionAPI) {
 			if (!current?.orchestrator) {
 				return { content: [{ type: "text", text: inactiveReason() }], details: undefined };
 			}
+			const notice = linkDownNotice(current.link);
+			const table = current.orchestrator.combinedTable();
 			return {
-				content: [{ type: "text", text: current.orchestrator.combinedTable() }],
+				content: [
+					{
+						type: "text",
+						text: notice
+							? `pi-mqtt has ${notice} — this roster is frozen and every dispatch fails. /mqtt disconnect then /mqtt connect to rejoin.\n\n${table}`
+							: table,
+					},
+				],
 				details: {
 					cluster: current.config.mqtt.cluster,
 					workers: current.orchestrator.entries().map((entry) => ({
@@ -834,7 +866,13 @@ export default function (pi: ExtensionAPI) {
 					ctx.ui.notify("pi-mqtt: the roster is only visible from an orchestrator.", "info");
 					return;
 				}
-				ctx.ui.notify(runtime.orchestrator.combinedTable(), "info");
+				const notice = linkDownNotice(runtime.link);
+				ctx.ui.notify(
+					notice
+						? `pi-mqtt has ${notice} — the roster below is frozen.\n\n${runtime.orchestrator.combinedTable()}`
+						: runtime.orchestrator.combinedTable(),
+					notice ? "warning" : "info",
+				);
 				return;
 			}
 

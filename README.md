@@ -175,7 +175,10 @@ Connecting is explicit: a configured session still opens no socket until `/mqtt 
 unless it was launched with `--pi-mqtt-start` or its config says `"connect": "auto"`.
 
 Dropped connections are re-established automatically (2s), subscriptions are re-applied, and a
-worker re-announces its presence immediately instead of waiting for the next heartbeat.
+session re-announces its presence immediately instead of waiting for the next heartbeat. When the
+link is down, the roster says so: `list_workers`, `/mqtt workers` and `dispatch_task` report the
+dead link instead of blaming a worker whose heartbeat age climbs only because this session stopped
+hearing it. `/mqtt disconnect` then `/mqtt connect` to rejoin.
 `/mqtt status` reports `drops: N (last <time>: <source> <code>)` once a connection has been lost,
 which distinguishes a normal close (`1000`) from an abnormal one (`1006`, no close frame — usually
 an intermediary or a sleeping machine). `keepaliveSec` defaults to 15, so a dead socket is noticed

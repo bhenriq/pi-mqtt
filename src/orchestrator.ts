@@ -180,6 +180,16 @@ export class Orchestrator {
 	}
 
 	dispatch(params: DispatchParams): DispatchOutcome {
+		// A dead link makes every entry in the roster look stale: say that plainly
+		// instead of blaming a worker that may be heartbeating perfectly well.
+		if (!this.link.online) {
+			const droppedAt = this.link.lastClose?.at;
+			const since = droppedAt ? ` (dropped ${formatAge(Date.now() - droppedAt)} ago)` : "";
+			return {
+				ok: false,
+				error: `pi-mqtt is not connected to the broker${since}: the roster is frozen, so nothing can be dispatched — /mqtt disconnect then /mqtt connect to rejoin`,
+			};
+		}
 		const entry = this.entries().find((item) => item.presence.workerId === params.to);
 		if (!entry) return { ok: false, error: `unknown worker "${params.to}"` };
 		if (entry.stale) {
