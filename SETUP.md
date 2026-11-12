@@ -193,6 +193,7 @@ worker is idle), `timeoutMs`, `maxCostUsd`, `repo: { baseSha | baseRef, branch }
 | Presence appears, but dispatched tasks fail with auth/model errors | The **worker** needs its own model credentials (`pi` → `/login`). The broker being reachable does not give it a model |
 | Task result says `busy with …` | A second task arrived while one ran; it was rejected rather than queued |
 | The roster empty on the orchestrator but the worker is running | Different room name or password, so they are in different namespaces |
+| pi-mqtt tools disappeared after `/reload` or a package update | Expected only for a session that was not in the room before the reload; a joined session rejoins by itself. If the transcript says it could not, `/mqtt connect` |
 
 Permission problems on the broker side — a worker that cannot read its own tasks,
 or can read someone else's — are covered in

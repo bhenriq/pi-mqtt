@@ -171,14 +171,20 @@ Editing configuration is a plain edit of `~/.pi/agent/pi-mqtt.json` (or the proj
 `--pi-mqtt-config <path>`); `/mqtt status` shows what it resolved to, including which value
 came from an environment variable. See [`pi-mqtt.example.json`](./pi-mqtt.example.json).
 
-Connecting is explicit: a configured session still opens no socket until `/mqtt connect`,
-unless it was launched with `--pi-mqtt-start` or its config says `"connect": "auto"`.
+Connecting is explicit: a configured session still opens no socket until `/mqtt connect`, unless
+it was launched with `--pi-mqtt-start` or its config says `"connect": "auto"`. The one exception
+is a reload: a session that was in the room rejoins when the new extension instance starts,
+because `/reload` — and therefore a package update — is not a new session. An explicit
+`/mqtt disconnect` is a decision, so it is never undone that way.
 
 Dropped connections are re-established automatically (2s), subscriptions are re-applied, and a
 session re-announces its presence immediately instead of waiting for the next heartbeat. When the
 link is down, the roster says so: `list_workers`, `/mqtt workers` and `dispatch_task` report the
 dead link instead of blaming a worker whose heartbeat age climbs only because this session stopped
-hearing it. `/mqtt disconnect` then `/mqtt connect` to rejoin.
+hearing it. `/mqtt disconnect` then `/mqtt connect` to rejoin. A session that leaves the room
+also posts one line into its transcript saying the pi-mqtt tools are inactive: a model cannot see
+a tool that is no longer registered, so without that line it reads its own older turns as current
+and reports a worker as offline from a roster that stopped updating before the disconnect.
 `/mqtt status` reports `drops: N (last <time>: <source> <code>)` once a connection has been lost,
 which distinguishes a normal close (`1000`) from an abnormal one (`1006`, no close frame — usually
 an intermediary or a sleeping machine). `keepaliveSec` defaults to 15, so a dead socket is noticed

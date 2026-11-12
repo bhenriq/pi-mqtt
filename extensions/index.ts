@@ -8,9 +8,9 @@
  * Nothing opens a socket at load time.
  */
 
-import { rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AutocompleteItem, AutocompleteProvider } from "@earendil-works/pi-tui";
@@ -81,9 +81,32 @@ interface Session {
 	log: LogFn;
 }
 
+
+/**
+ * A session that joined the room, remembered on disk so a reload can rejoin.
+ *
+ * `/reload` re-evaluates this module: every in-memory fact is gone, including the
+ * fact that the session was in the room a second earlier. Reload is also how a
+ * package update takes effect, so without this the price of an update is a silently
+ * disconnected session whose tools vanish while the transcript still reads as if
+ * they work. The pid pins the marker to the process that wrote it, so a crashed run
+ * cannot make a later resume rejoin by surprise.
+ */
+interface JoinMarker {
+	pid: number;
+	sessionId: string;
+	role: "worker" | "orchestrator";
+	workerId: string;
+	cluster: string;
+	url: string;
+	joinedAt: number;
+}
+
 let api: ExtensionAPI | undefined;
 /** Worker id chosen for this session at join time (not the file's default). */
 let sessionWorkerId: string | undefined;
+/** Session id of the pi session this instance serves, for the join marker. */
+let currentSessionId: string | undefined;
 let session: Session | undefined;
 let completionRegistered = false;
 let runtime: Runtime | undefined;
@@ -192,8 +215,14 @@ function autoStartRequested(pi: ExtensionAPI, config: AppConfig): boolean {
 	return config.connect === "auto";
 }
 
-/** Read the config and remember it. Connecting is a separate, explicit step. */
-async function prepareSession(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
+/**
+ * Read the config and remember it. Connecting is a separate, explicit step.
+ *
+ * Reports whether the session is configured, and leaves the "run /mqtt connect"
+ * reminder to the caller: on a reload that is about to rejoin, telling the user to
+ * connect and then connecting is just noise.
+ */
+async function prepareSession(pi: ExtensionAPI, ctx: ExtensionContext): Promise<boolean> {
 	const role = (pi.getFlag(FLAG_ROLE) as string | undefined) ?? process.env.PI_MQTT_ROLE;
 	const configPath = pi.getFlag(FLAG_CONFIG) as string | undefined;
 
@@ -204,7 +233,7 @@ async function prepareSession(pi: ExtensionAPI, ctx: ExtensionContext): Promise<
 	});
 	if (!loaded.ok) {
 		if (role) ctx.ui.notify(`pi-mqtt inactive: ${loaded.reason}`, "warning");
-		return;
+		return false;
 	}
 
 	const config = loaded.config;
@@ -212,18 +241,15 @@ async function prepareSession(pi: ExtensionAPI, ctx: ExtensionContext): Promise<
 
 	if (autoStartRequested(pi, config)) {
 		await connectRuntime(pi, ctx, { auto: true });
-		return;
 	}
-	ctx.ui.notify(
-		`pi-mqtt configured as ${config.role} "${config.worker.workerId}" — run /mqtt connect to connect`,
-		"info",
-	);
+	return true;
 }
 
 async function connectRuntime(
 	pi: ExtensionAPI,
 	ctx: ExtensionContext,
-	options: { auto?: boolean } = {},
+	/** `rejoin`: the session was in this room a moment ago and a reload took it out. */
+	options: { auto?: boolean; rejoin?: boolean } = {},
 ): Promise<boolean> {
 	const current = session;
 	if (!current) {
@@ -290,8 +316,11 @@ async function connectRuntime(
 	}
 
 	// One worker id, one live session: two sessions under the same id both consume
-	// tasks and their results race, so take over explicitly or not at all.
-	if (isWorker) {
+	// tasks and their results race, so take over explicitly or not at all. A rejoin
+	// skips the check: the live session under this id was this one, a second ago, and
+	// its retained entry may not even be gone yet. If a newcomer did claim the id in
+	// that window, the broker's takeover (and the notice for the loser) settles it.
+	if (isWorker && !options.rejoin) {
 		const existing = await probePresence(link, topics, config.worker.workerId, 1200);
 		const fresh = existing && existing.state !== "offline" && Date.now() - existing.updatedAt < config.worker.heartbeatMs * 3;
 		if (fresh && pi.getFlag(FLAG_FORCE) !== true) {
@@ -351,7 +380,7 @@ async function connectRuntime(
 	// reconnecting and evicting the newcomer in a loop. Silently stopping would leave a
 	// session that looks connected but hears nothing, so say it either way.
 	link.onTakenOver = () => {
-		void disconnectRuntime();
+		void disconnectRuntime({ why: "another session took over this id" });
 		ctx.ui.notify(
 			`pi-mqtt: session "${config.worker.workerId}" was taken over by another session; this one stopped. Rename this pi session if that was not intended.`,
 			"error",
@@ -367,15 +396,25 @@ async function connectRuntime(
 		ctx.ui.notify(`pi-mqtt: ${payload.from} removed everyone from the room${why}. Disconnected.`, "warning");
 		if (runtime.config.role === "worker") currentCtx?.abort();
 		runtime.presence?.forget();
-		void disconnectRuntime();
+		void disconnectRuntime({ why: `removed from the room by ${payload.from}` });
 	});
 
 	runtime = connected;
+	rememberJoin(config, config.worker.workerId);
 	ctx.ui.notify(`pi-mqtt ${config.role} "${config.worker.workerId}" connected to ${topics.base}`, "info");
 	return true;
 }
 
-async function disconnectRuntime(): Promise<void> {
+interface LeaveOptions {
+	/** A reload is about to rejoin: keep the marker for the next instance. */
+	keepJoin?: boolean;
+	/** Tearing the session down: nobody will read a transcript note. */
+	quiet?: boolean;
+	/** Why we are leaving, for the transcript note. */
+	why?: string;
+}
+
+async function disconnectRuntime(options: LeaveOptions = {}): Promise<void> {
 	const current = runtime;
 	runtime = undefined;
 	if (!current) return;
@@ -388,12 +427,14 @@ async function disconnectRuntime(): Promise<void> {
 		const keep = api.getActiveTools().filter((name) => !ORCHESTRATOR_TOOLS.includes(name));
 		api.setActiveTools(keep);
 	}
+	if (!options.keepJoin) forgetJoin(current.config.logDir, currentSessionId);
+	if (!options.quiet) postOfflineNote(options.why ?? "disconnected");
 }
 
 /** Session end: disconnect (gracefully) and forget the config. */
-async function endSession(): Promise<void> {
+async function endSession(options: { reloading?: boolean } = {}): Promise<void> {
 	completionRegistered = false;
-	await disconnectRuntime();
+	await disconnectRuntime({ keepJoin: options.reloading === true, quiet: true });
 	session = undefined;
 	sessionWorkerId = undefined;
 }
@@ -528,6 +569,73 @@ function withSubcommandCompletion(current: AutocompleteProvider): AutocompletePr
 			return current.shouldTriggerFileCompletion?.(lines, cursorLine, cursorCol) ?? true;
 		},
 	};
+}
+
+function joinMarkerPath(logDir: string, sessionId: string): string {
+	return join(logDir, "joined", `${sanitizeId(sessionId) || "session"}.json`);
+}
+
+function rememberJoin(config: AppConfig, workerId: string): void {
+	if (!currentSessionId) return;
+	try {
+		const path = joinMarkerPath(config.logDir, currentSessionId);
+		mkdirSync(dirname(path), { recursive: true });
+		const marker: JoinMarker = {
+			pid: process.pid,
+			sessionId: currentSessionId,
+			role: config.role,
+			workerId,
+			cluster: config.mqtt.cluster,
+			url: config.mqtt.url,
+			joinedAt: Date.now(),
+		};
+		writeFileSync(path, JSON.stringify(marker));
+	} catch {
+		// A marker that cannot be written only costs a manual /mqtt connect after a reload.
+	}
+}
+
+/** The join this session had a moment ago, if the room is still the same one. */
+function readJoin(config: AppConfig, sessionId: string | undefined): JoinMarker | undefined {
+	if (!sessionId) return undefined;
+	try {
+		const marker = JSON.parse(readFileSync(joinMarkerPath(config.logDir, sessionId), "utf8")) as JoinMarker;
+		if (marker.pid !== process.pid || marker.sessionId !== sessionId) return undefined;
+		if (marker.role !== config.role) return undefined;
+		if (marker.cluster !== config.mqtt.cluster || marker.url !== config.mqtt.url) return undefined;
+		return marker;
+	} catch {
+		return undefined;
+	}
+}
+
+function forgetJoin(logDir: string, sessionId: string | undefined): void {
+	if (!sessionId) return;
+	try {
+		rmSync(joinMarkerPath(logDir, sessionId), { force: true });
+	} catch {
+		// Nothing to forget.
+	}
+}
+
+/**
+ * Put the truth in the transcript: the tools just went away, and the model cannot
+ * see a tool that is no longer active. Without this line it reads its own older
+ * turns as current, and reports a worker as offline from a roster that stopped
+ * updating before the disconnect.
+ */
+function postOfflineNote(why: string): void {
+	api?.sendMessage(
+		{
+			customType: "pi-mqtt-notice",
+			content:
+				`pi-mqtt left the room: ${why}. list_workers, dispatch_task and the other pi-mqtt tools are inactive until /mqtt connect. ` +
+				"Anything pi-mqtt-related above this line describes the room as it was before this point, not as it is now.",
+			display: true,
+			details: { why },
+		},
+		{ triggerTurn: false },
+	);
 }
 
 /**
@@ -853,7 +961,7 @@ export default function (pi: ExtensionAPI) {
 					ctx.ui.notify("pi-mqtt is not connected.", "info");
 					return;
 				}
-				await disconnectRuntime();
+				await disconnectRuntime({ why: "disconnected by /mqtt disconnect" });
 				ctx.ui.notify("pi-mqtt disconnected.", "info");
 				return;
 			}
@@ -896,23 +1004,44 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	pi.on("session_start", async (_event, ctx) => {
+	pi.on("session_start", async (event, ctx) => {
 		currentCtx = ctx;
 		if (!completionRegistered) {
 			completionRegistered = true;
 			ctx.ui.addAutocompleteProvider(withSubcommandCompletion);
 		}
 		api = pi;
-		await endSession();
+		currentSessionId = ctx.sessionManager.getSessionId();
+		await endSession({ reloading: event.reason === "reload" });
+		let configured = false;
 		try {
-			await prepareSession(pi, ctx);
+			configured = await prepareSession(pi, ctx);
 		} catch (error) {
 			ctx.ui.notify(`pi-mqtt: ${(error as Error).message}`, "error");
 		}
+
+		// A reload keeps the process and the session, so re-establish the room the previous
+		// instance left. Any other reason is a different life for this id: a leftover marker
+		// (a crashed run) must not make it join on its own.
+		const previous = session && event.reason === "reload" ? readJoin(session.config, currentSessionId) : undefined;
+		if (previous) {
+			const joined = await connectRuntime(pi, ctx, { rejoin: true });
+			if (!joined) postOfflineNote(`the reload could not re-establish the room`);
+		} else if (session && !runtime) {
+			forgetJoin(session.config.logDir, currentSessionId);
+		}
+
+		if (configured && !runtime && session) {
+			ctx.ui.notify(
+				`pi-mqtt configured as ${session.config.role} "${session.config.worker.workerId}" — run /mqtt connect to connect`,
+				"info",
+			);
+		}
 	});
 
-	pi.on("session_shutdown", async () => {
-		await endSession();
+	pi.on("session_shutdown", async (event) => {
+		// On reload the marker stays, because the next instance rejoins from it.
+		await endSession({ reloading: event.reason === "reload" });
 		currentCtx = undefined;
 	});
 
