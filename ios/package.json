@@ -1,0 +1,18 @@
+{
+  "name": "pi-mqtt-ios",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "pi-mqtt for pi on iOS: drive named pi workers over MQTT from your phone",
+  "keywords": ["pi-package", "mqtt", "ios", "orchestration"],
+  "pi": {
+    "extensions": ["./index.ts"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*"
+  },
+  "files": ["index.ts", "src", "README.md"],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bhenriq/pi-mqtt.git"
+  }
+}

@@ -201,6 +201,25 @@ Task transcripts are the worker's own sessions, and each result reports `session
 so you can `/resume` a worker run and read exactly what it did. Per-task JSONL logs
 land in `~/.pi/agent/pi-mqtt/tasks/<worker>.jsonl`.
 
+## From an iPhone
+
+pi on iOS has no raw TCP, so it cannot use `mqtt.js`. [ios/](./ios/) is a
+dependency-free orchestrator for pi on iOS that speaks this same protocol over
+MQTT-over-WebSocket, so a phone joins the room like any other session:
+
+```bash
+extension_add github:bhenriq/pi-mqtt/ios   # on the phone, in a pi session
+/mqtt setup      # broker (wss://…), room, name for this phone
+/mqtt password   # room password → Keychain
+/mqtt connect
+```
+
+It registers `mqtt_workers`, `mqtt_dispatch`, `mqtt_result`, `mqtt_tasks`,
+`mqtt_cancel`, `mqtt_status`, `/mqtt …`, and an **MQTT app** in the dock: worker
+cards with state and heartbeat age, a task composer, results, and a dock badge
+for outstanding tasks. Or just ask, in the transcript: *"ask lap-b to run the test
+suite and summarise what failed"*. See [ios/README.md](./ios/README.md).
+
 ## Public broker
 
 A broker is deployed on Railway and reachable as
