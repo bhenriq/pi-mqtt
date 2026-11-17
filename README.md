@@ -190,6 +190,11 @@ which distinguishes a normal close (`1000`) from an abnormal one (`1006`, no clo
 an intermediary or a sleeping machine). `keepaliveSec` defaults to 15, so a dead socket is noticed
 in about 22s.
 
+Retries start at `reconnectMs` (2s) and double to a 30s ceiling, so a broker that is unreachable —
+DNS failure, deploy in progress, laptop off the network — costs two attempts a minute instead of
+one every 2s. An outage is one warning and one `drops:` increment; the individual retries are logged
+at info level, which is what bare `/mqtt` prints and notifications do not.
+
 `dispatch_task` options worth knowing: `notify: "silent" | "wake"`, `ifBusy: "fail" | "wait"`,
 `timeoutMs`, `maxCostUsd`, and `repo: { baseRef | baseSha, branch }`.
 

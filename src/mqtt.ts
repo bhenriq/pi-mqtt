@@ -10,6 +10,8 @@ import type { MqttConfig } from "./config.ts";
 import { decodePayload, type Json } from "./protocol.ts";
 
 const PUBLISH_TIMEOUT_MS = 4000;
+/** Ceiling for the reconnect backoff: an unreachable broker is retried twice a minute. */
+const MAX_RECONNECT_MS = 30_000;
 
 export interface PublishOptions {
 	retain?: boolean;
@@ -50,7 +52,14 @@ export class MqttLink {
 	/** Suppresses per-retry error spam until the first successful handshake. */
 	private everConnected = false;
 	private closeInfo: CloseInfo | undefined;
+	/** Outages, not attempts: a minute of DNS failure is one drop, not thirty. */
 	private reconnectCount = 0;
+	/** Own retry loop: mqtt.js's fixed period cannot back off, so it is disabled. */
+	private reconnectTimer: NodeJS.Timeout | undefined;
+	private reconnectAttempts = 0;
+	private offlineSince: number | undefined;
+	/** Last reconnect error, so a repeated failure is not logged over and over. */
+	private lastAttemptError: string | undefined;
 	private readonly trackedStreams = new WeakSet<object>();
 	/** Called after every successful (re)connect, including the first. */
 	onReconnect?: () => void;
@@ -83,7 +92,10 @@ export class MqttLink {
 			protocolVersion: config.protocolVersion === 4 ? 4 : 5,
 			clean: true,
 			keepalive: config.keepaliveSec,
-			reconnectPeriod: config.reconnectMs,
+			// mqtt.js retries on a fixed interval, which turns a ten-minute DNS outage into
+			// three hundred attempts and as many notifications. Reconnection is driven from
+			// here instead, with backoff and one message per outage (see scheduleReconnect).
+			reconnectPeriod: 0,
 			connectTimeout: 10_000,
 			username: config.username,
 			password: config.password,
@@ -104,7 +116,16 @@ export class MqttLink {
 
 		client.on("connect", () => {
 			this.everConnected = true;
+			this.clearReconnectTimer();
+			const outage = this.offlineSince === undefined ? 0 : Date.now() - this.offlineSince;
+			const attempts = this.reconnectAttempts;
+			this.offlineSince = undefined;
+			this.reconnectAttempts = 0;
+			this.lastAttemptError = undefined;
 			options.log("info", `mqtt connected to ${config.url} as ${options.clientId}`);
+			if (outage > 0) {
+				options.log("info", `mqtt reconnected after ${Math.round(outage / 1000)}s (${attempts} attempt${attempts === 1 ? "" : "s"})`);
+			}
 			// clean:true means the broker forgot our subscriptions; re-apply them.
 			this.trackStream(client);
 			for (const filter of this.handlers.keys()) {
@@ -115,16 +136,22 @@ export class MqttLink {
 			options.onOnline?.();
 			this.onReconnect?.();
 		});
-		client.on("reconnect", () => options.log("info", "mqtt reconnecting"));
 		client.on("close", () => {
-			if (this.closed || !this.everConnected) return;
-			this.reconnectCount += 1;
+			if (this.closed || this.takenOver || !this.everConnected) return;
 			if (!this.closeInfo) this.closeInfo = { at: Date.now(), source: "socket" };
 			const info = this.closeInfo;
-			options.log(
-				"warn",
-				`mqtt connection closed (${info.source}${info.code !== undefined ? " " + describeCloseCode(info.code) : ""}${info.reason ? `, ${info.reason}` : ""}), reconnecting`,
-			);
+			const detail = `${info.source}${info.code !== undefined ? " " + describeCloseCode(info.code) : ""}${info.reason ? `, ${info.reason}` : ""}`;
+			// One warning per outage: everything after it is a retry, and the retries belong
+			// in the log ring (bare /mqtt), not in the notification area where they would
+			// march past a user who can do nothing about them.
+			if (this.offlineSince === undefined) {
+				this.reconnectCount += 1;
+				this.offlineSince = Date.now();
+				options.log("warn", `mqtt connection lost (${detail}); retrying in the background`);
+			} else {
+				options.log("info", `mqtt still offline (${detail})`);
+			}
+			this.scheduleReconnect();
 		});
 		// MQTT 5 server-initiated DISCONNECT carries a reason code: the broker is
 		// telling us why, which a bare socket close never does.
@@ -144,7 +171,17 @@ export class MqttLink {
 
 		client.on("error", (error) => {
 			// Before the first handshake the connect() rejection reports it once.
-			if (this.everConnected) options.log("error", `mqtt error: ${error.message}`);
+			if (!this.everConnected || this.takenOver) return;
+			if (this.offlineSince === undefined) {
+				// A live connection reporting an error is news.
+				options.log("error", `mqtt error: ${error.message}`);
+				return;
+			}
+			// While retrying, the same failure repeating is not news: log it when it changes.
+			if (error.message !== this.lastAttemptError) {
+				this.lastAttemptError = error.message;
+				options.log("info", `mqtt retry failed: ${error.message}`);
+			}
 		});
 		client.on("message", (topic, payload) => {
 			// A zero-length payload on a retained topic is a deletion, not garbage:
@@ -303,12 +340,40 @@ export class MqttLink {
 
 	async close(): Promise<void> {
 		this.closed = true;
+		this.clearReconnectTimer();
 		const client = this.client;
 		this.client = undefined;
 		if (!client) return;
 		await new Promise<void>((resolve) => {
 			client.end(false, {}, () => resolve());
 		});
+	}
+
+	/**
+	 * Retry on our own schedule: reconnectMs, doubling, capped.
+	 *
+	 * mqtt.js retries on a fixed period, which cannot back off, so its loop is switched
+	 * off at connect time and the retries are driven from here. One timer at a time, and
+	 * a successful connect resets the count — a blip still costs the configured 2s, while
+	 * an unreachable broker settles down to twice a minute instead of hammering DNS.
+	 */
+	private scheduleReconnect(): void {
+		if (this.closed || this.takenOver || this.reconnectTimer) return;
+		const client = this.client;
+		if (!client) return;
+		const delay = Math.min(this.config.reconnectMs * 2 ** this.reconnectAttempts, MAX_RECONNECT_MS);
+		this.reconnectAttempts += 1;
+		this.reconnectTimer = setTimeout(() => {
+			this.reconnectTimer = undefined;
+			if (this.closed || this.takenOver) return;
+			client.reconnect();
+		}, delay);
+		this.reconnectTimer.unref?.();
+	}
+
+	private clearReconnectTimer(): void {
+		if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+		this.reconnectTimer = undefined;
 	}
 
 	/** Attach close-code reporting to the transport socket, once per socket. */

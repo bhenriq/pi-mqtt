@@ -81,7 +81,6 @@ interface Session {
 	log: LogFn;
 }
 
-
 /**
  * A session that joined the room, remembered on disk so a reload can rejoin.
  *
