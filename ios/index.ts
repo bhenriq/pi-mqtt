@@ -20,8 +20,18 @@
 import { Type } from "@earendil-works/pi-ai";
 import { MqttWs } from "./src/mqtt-ws.ts";
 import { appHtml, type Snapshot } from "./src/page.ts";
-import { PROTOCOL_VERSION, buildPresence, topicsFor, type PresenceIdentity } from "./src/protocol.ts";
+import { Pairing } from "./src/pairing.ts";
+import {
+	formatPairingCode,
+	fingerprintOf,
+	PROTOCOL_VERSION,
+	buildPresence,
+	topicsFor,
+	type PairMessage,
+	type PresenceIdentity,
+} from "./src/protocol.ts";
 import { Room, type TaskRecord } from "./src/room.ts";
+import { TrustStore } from "./src/trust.ts";
 import { IDENTIFIER, clip, formatAge, sanitizeId, type LogLine } from "./src/util.ts";
 
 // ---------------------------------------------------------------------------
@@ -63,6 +73,7 @@ let api: any;
 let settings: Settings;
 let client: MqttWs | undefined;
 let room: Room | undefined;
+let pairing: Pairing | undefined;
 let connecting: Promise<void> | undefined;
 let appHandle: any;
 let lastCtx: CtxLike | undefined;
@@ -220,11 +231,42 @@ async function ensureConnected(ctx?: CtxLike): Promise<void> {
 			},
 			log,
 		});
-		const next = new Room(link, t, identity, s.heartbeatMs, log, schedulePush, deliverResult, (from, reason) => {
-			const why = reason ? `: ${reason}` : "";
-			lastCtx?.ui?.notify(`mqtt: ${from} removed everyone from the room${why}. Left the room.`, "warning");
-			void disconnectRoom("removed from the room");
+		// Worker admission: a worker joins as `pending` and only becomes dispatchable
+		// once this phone approves its key (silently if it is already on file).
+		const trust = new TrustStore(api.synced, s.room, log);
+		const admission = new Pairing({
+			room: s.room,
+			orchestratorId: s.name,
+			trust,
+			log,
+			onChange: schedulePush,
+			onOffer: (offer) => {
+				log(
+					"warn",
+					`${offer.workerId} wants to join: code ${formatPairingCode(offer.code)} — compare it with the worker's screen, then /mqtt admit ${offer.workerId} ${offer.code}`,
+				);
+			},
+			publish: (message: PairMessage) => {
+				void link.publishJson(t.pair(message.workerId), message, { qos: 1 }).catch((error: Error) => {
+					log("warn", `pairing message failed: ${error.message}`);
+				});
+			},
 		});
+		const next = new Room(
+			link,
+			t,
+			identity,
+			s.heartbeatMs,
+			log,
+			schedulePush,
+			deliverResult,
+			(from, reason) => {
+				const why = reason ? `: ${reason}` : "";
+				lastCtx?.ui?.notify(`mqtt: ${from} removed everyone from the room${why}. Left the room.`, "warning");
+				void disconnectRoom("removed from the room");
+			},
+			admission,
+		);
 		try {
 			await link.connect();
 		} catch (error) {
@@ -233,6 +275,7 @@ async function ensureConnected(ctx?: CtxLike): Promise<void> {
 		}
 		client = link;
 		room = next;
+		pairing = admission;
 		next.start();
 		await next.waitForRoster();
 		// A reconnect means the retained presence may have been swept and the filters
@@ -255,6 +298,7 @@ async function disconnectRoom(reason?: string, options: { quiet?: boolean } = {}
 	const currentClient = client;
 	room = undefined;
 	client = undefined;
+	pairing = undefined;
 	if (currentRoom) await currentRoom.stop(options);
 	if (currentClient) await currentClient.close();
 	if (reason) log("info", reason);
@@ -324,6 +368,10 @@ function snapshot(statusOverride?: Snapshot["status"]): Snapshot {
 				id: presence.workerId,
 				state: presence.state,
 				stale,
+				pending: presence.state === "pending",
+				approved: pairing ? pairing.isApproved(presence) : undefined,
+				...(presence.state === "pending" ? { code: pairing?.codeFor(presence.workerId) } : {}),
+				...(presence.key ? { fingerprint: fingerprintOf(presence.key) } : {}),
 				...(presence.repo ? { repo: presence.repo } : {}),
 				...(presence.branch ? { branch: presence.branch } : {}),
 				...(presence.model ? { model: presence.model } : {}),
@@ -440,7 +488,22 @@ function workerTable(): string {
 	const header = ["ID", "ROLE", "STATE", "REPO", "MODEL", "AGE", "CWD"]
 		.map((label, index) => label.padEnd([20, 13, 9, 24, 20, 5, 3][index] ?? 8))
 		.join("  ");
-	return [header, ...rows].join("\n");
+	const waiting = (pairing?.list() ?? []).map((offer) => {
+		const minutes = Math.max(0, Math.round((offer.expiresAt - Date.now()) / 60_000));
+		return `  ${offer.workerId} · code ${formatPairingCode(offer.code)} · expires in ${minutes}m`;
+	});
+	const approved = (pairing?.trusted() ?? []).map((worker) => `${worker.workerId} (${worker.fingerprint})`);
+	const notes: string[] = [];
+	if (waiting.length > 0) {
+		notes.push(
+			[
+				"waiting for approval (compare each code with the worker's screen, then /mqtt admit <worker> <code>):",
+				...waiting,
+			].join("\n"),
+		);
+	}
+	if (approved.length > 0) notes.push(`approved by this phone: ${approved.join(", ")}`);
+	return [header, ...rows, ...notes].join("\n");
 }
 
 function taskTable(): string {
@@ -496,7 +559,7 @@ function registerTools(): void {
 		name: "mqtt_workers",
 		label: "List MQTT workers",
 		description:
-			"List the pi-mqtt workers and orchestrators in this phone's MQTT room: state (idle/busy/offline), repo and branch, model, working directory, heartbeat age.",
+			"List the pi-mqtt workers and orchestrators in this phone's MQTT room: state (idle/busy/offline/pending), repo and branch, model, working directory, heartbeat age, and the approval codes of workers waiting to be admitted.",
 		parameters: Type.Object({}),
 		defaultActive: true,
 		async execute(_id: string, _params: unknown, _signal: AbortSignal, _onUpdate: unknown, ctx: CtxLike) {
@@ -516,7 +579,8 @@ function registerTools(): void {
 			"Send a task to one named pi-mqtt worker from this phone. Waits for the result by default and returns it. The worker runs the prompt in its own pi session on its own machine.",
 		promptSnippet: "mqtt_dispatch — hand work to a pi worker on another machine, from the phone",
 		promptGuidelines: [
-			"Use `mqtt_workers` to see which machines are reachable before dispatching; `mqtt_dispatch` fails on unknown, offline or stale workers.",
+			"Use `mqtt_workers` to see which machines are reachable before dispatching; `mqtt_dispatch` fails on unknown, offline, stale or unapproved workers.",
+			"A worker that just joined is `pending` until this phone approves its key: `mqtt_pair` lists the code to compare with the worker's screen, and admits it.",
 			"`mqtt_dispatch` waits for the worker's final message by default, so do not also poll with `mqtt_result`.",
 		],
 		parameters: Type.Object({
@@ -660,6 +724,101 @@ function registerTools(): void {
 	});
 
 	api.registerTool({
+		name: "mqtt_pair",
+		label: "Approve MQTT workers",
+		description:
+			"Worker admission on this phone's MQTT room. A worker joins as pending and cannot be dispatched to until this phone approves its key: `pending` lists the workers waiting and the six-digit code to compare with the worker's screen, `admit` approves one with that code, `revoke` stops trusting one, `trusted` lists the approved keys.",
+		promptSnippet: "mqtt_pair — approve a pi worker's key before dispatching to it",
+		promptGuidelines: [
+			"A dispatch refused with 'waiting for approval' means mqtt_pair(action: \"pending\") shows a code the user compares with the worker's own screen; then mqtt_pair(action: \"admit\", worker, code).",
+			"Never invent a code: without one from the worker's screen, ask the user to compare.",
+		],
+		parameters: Type.Object({
+			action: Type.Union(
+				[Type.Literal("pending"), Type.Literal("admit"), Type.Literal("revoke"), Type.Literal("trusted")],
+				{ description: "pending (default) lists the codes waiting; admit and revoke act on one worker" },
+			),
+			worker: Type.Optional(Type.String({ description: "Worker id, e.g. lap-b" })),
+			code: Type.Optional(Type.String({ description: "The six digits shown on both screens, e.g. 481902 or '481 902'" })),
+		}),
+		defaultActive: true,
+		async execute(_id: string, params: any, _signal: AbortSignal, _onUpdate: unknown, ctx: CtxLike) {
+			lastCtx = ctx;
+			const failure = await toolConnect(ctx);
+			if (failure) return { content: [{ type: "text" as const, text: failure }], isError: true };
+			const current = pairing;
+			if (!current) return { content: [{ type: "text" as const, text: "worker admission is not active: /mqtt connect first" }], isError: true };
+			const action = params.action ?? "pending";
+
+			if (action === "pending") {
+				const offers = current.list();
+				if (offers.length === 0) {
+					return {
+						content: [{ type: "text" as const, text: "No worker is waiting for approval. A worker shows a code here once it joins." }],
+						details: { offers: [] },
+					};
+				}
+				const text = offers
+					.map((offer) => {
+						const minutes = Math.max(0, Math.round((offer.expiresAt - Date.now()) / 60_000));
+						return `${offer.workerId} · code ${formatPairingCode(offer.code)} · expires in ${minutes}m`;
+					})
+					.join("\n");
+				return {
+					content: [
+						{
+							type: "text" as const,
+							text: `waiting for approval (compare each code with the worker's screen, then mqtt_pair admit):\n${text}`,
+						},
+					],
+					details: { offers: offers.map(({ workerId, code, expiresAt }) => ({ workerId, code, expiresAt })) },
+				};
+			}
+
+			if (action === "trusted") {
+				const trusted = current.trusted();
+				const text =
+					trusted.length === 0
+						? `No worker key is approved by this phone in ${settings.room} yet.`
+						: trusted
+								.map(
+									(worker) =>
+										`${worker.workerId} · ${worker.fingerprint} · approved ${formatAge(Date.now() - worker.admittedAt)} ago`,
+								)
+								.join("\n");
+				return { content: [{ type: "text" as const, text }], details: { trusted } };
+			}
+
+			const workerId = sanitizeId(String(params.worker ?? ""));
+			if (!workerId) return { content: [{ type: "text" as const, text: `which worker? mqtt_pair ${action} needs worker` }], isError: true };
+			if (action === "revoke") {
+				const outcome = current.revoke(workerId);
+				return {
+					content: [
+						{
+							type: "text" as const,
+							text: outcome.ok ? `revoked "${workerId}": it goes back to pending on its next heartbeat` : (outcome.error ?? "revoke failed"),
+						},
+					],
+					isError: !outcome.ok,
+				};
+			}
+			const typed = String(params.code ?? "").replace(/\s+/g, "");
+			if (!typed) return { content: [{ type: "text" as const, text: "admit needs the code shown on the worker's screen (mqtt_pair pending lists it)" }], isError: true };
+			const outcome = current.admit(workerId, typed);
+			return {
+				content: [
+					{
+						type: "text" as const,
+						text: outcome.ok ? `approved "${workerId}"; it becomes idle within a heartbeat and can take tasks` : (outcome.error ?? "admit failed"),
+					},
+				],
+				isError: !outcome.ok,
+			};
+		},
+	});
+
+	api.registerTool({
 		name: "mqtt_status",
 		label: "MQTT status",
 		description: "This phone's MQTT room connection: broker, room, device name, whether the link is up, and how many workers are reachable.",
@@ -670,12 +829,15 @@ function registerTools(): void {
 			const snap = snapshot();
 			const lines = [
 				`device:  ${snap.me} (orchestrator)`,
-				`broker:  ${snap.url}`,
+				`broker:  ${snap.url} as ${snap.settings.username}`,
 				`room:    ${snap.room}  →  pi/v${PROTOCOL_VERSION}/${snap.room}`,
 				`state:   ${snap.status}${snap.lastError ? ` — last drop ${snap.lastError}` : ""}`,
 				...(client ? [`link:    ${client.online ? "up" : "down"}, ${client.reconnects} reconnect(s) since launch`] : []),
 				`secret:  ${snap.hasPassword ? `${SECRET_NAME} is set` : "no room password yet (/mqtt password)"}`,
-				`workers: ${snap.workers.filter((worker) => !worker.stale && worker.state !== "offline").length} reachable of ${snap.workers.length} known`,
+				`workers: ${snap.workers.filter((worker) => !worker.stale && worker.state !== "offline" && worker.state !== "pending").length} reachable of ${snap.workers.length} known`,
+				...(pairing && pairing.list().length > 0
+					? [`waiting: ${pairing.list().map((offer) => `${offer.workerId} ${formatPairingCode(offer.code)}`).join(", ")} — /mqtt admit <worker> <code>`]
+					: []),
 				`tasks:   ${snap.tasks.filter((task) => ["queued", "sent", "running"].includes(task.state)).length} outstanding`,
 			];
 			return { content: [{ type: "text" as const, text: lines.join("\n") }], details: snap };
@@ -689,7 +851,14 @@ async function setupRoom(ctx: CtxLike): Promise<void> {
 	const url = (await ui.input("MQTT broker URL (WebSocket)", settings.url)) ?? settings.url;
 	const roomName = (await ui.input("Room name", settings.room)) ?? settings.room;
 	const name = (await ui.input("Name for this phone in the roster", settings.name)) ?? settings.name;
-	await applySettings({ url: String(url).trim(), room: String(roomName).trim(), name: String(name).trim() });
+	const username =
+		(await ui.input("Broker user — the one with the orchestrator role", settings.username)) ?? settings.username;
+	await applySettings({
+		url: String(url).trim(),
+		room: String(roomName).trim(),
+		name: String(name).trim(),
+		username: String(username).trim() || settings.username,
+	});
 	const password = await ui.input("Room password (stored in the Keychain)", "shared by every session in the room");
 	if (password && String(password).trim()) await storePassword(String(password));
 	ui.notify(`mqtt: ${settings.name} → ${settings.room} at ${settings.url}`, "info");
@@ -700,10 +869,13 @@ function showStatus(ctx: CtxLike): void {
 	const snap = snapshot();
 	const lines = [
 		`device:  ${snap.me}`,
-		`broker:  ${snap.url}`,
+		`broker:  ${snap.url} as ${snap.settings.username}`,
 		`room:    ${snap.room}`,
 		`state:   ${snap.status}${snap.lastError ? ` (last drop ${snap.lastError})` : ""}`,
-		`workers: ${snap.workers.length} known, ${snap.workers.filter((w) => !w.stale && w.state !== "offline").length} reachable`,
+		`workers: ${snap.workers.length} known, ${snap.workers.filter((w) => !w.stale && w.state !== "offline" && w.state !== "pending").length} reachable`,
+		...(pairing && pairing.list().length > 0
+			? [`waiting: ${pairing.list().map((offer) => `${offer.workerId} ${formatPairingCode(offer.code)}`).join(", ")}`]
+			: []),
 		`tasks:   ${snap.tasks.length} dispatched from this phone`,
 	];
 	ctx.ui?.notify(lines.join("\n"), "info");
@@ -724,7 +896,8 @@ async function applySettings(patch: Partial<Settings>): Promise<void> {
 
 function registerCommand(): void {
 	api.registerCommand("mqtt", {
-		description: "MQTT on iOS: /mqtt status|connect|disconnect|workers|tasks|forget|setup|password|app|notify on|off",
+		description:
+			"MQTT on iOS: /mqtt status|connect|disconnect|workers|tasks|pending|admit|revoke|trusted|forget|setup|password|app|notify on|off",
 		handler: async (args: string, ctx: CtxLike & { signal?: AbortSignal }) => {
 			lastCtx = ctx;
 			const [head, ...rest] = args.trim().split(/\s+/);
@@ -755,6 +928,67 @@ function registerCommand(): void {
 			}
 			if (arg === "tasks") {
 				ctx.ui?.notify(taskTable(), "info");
+				return;
+			}
+			if (arg === "pending") {
+				const offers = pairing?.list() ?? [];
+				if (offers.length === 0) {
+					ctx.ui?.notify("mqtt: no worker is waiting for approval", "info");
+					return;
+				}
+				const text = offers
+					.map((offer) => {
+						const minutes = Math.max(0, Math.round((offer.expiresAt - Date.now()) / 60_000));
+						return `  ${offer.workerId} · code ${formatPairingCode(offer.code)} · expires in ${minutes}m`;
+					})
+					.join("\n");
+				ctx.ui?.notify(
+					`waiting for approval (compare each code with the worker's screen, then /mqtt admit <worker> <code>):\n${text}`,
+					"warning",
+				);
+				return;
+			}
+			if (arg === "admit") {
+				const [workerId, code] = tail.split(/\s+/);
+				if (!workerId || !code) {
+					ctx.ui?.notify("mqtt: /mqtt admit <worker> <code> — codes: /mqtt pending", "warning");
+					return;
+				}
+				if (!pairing) {
+					ctx.ui?.notify("mqtt: not connected — /mqtt connect first", "warning");
+					return;
+				}
+				const outcome = pairing.admit(workerId, code);
+				ctx.ui?.notify(
+					outcome.ok ? `mqtt: approved "${workerId}" — it takes tasks within a heartbeat` : `mqtt: ${outcome.error}`,
+					outcome.ok ? "info" : "error",
+				);
+				pushNow();
+				return;
+			}
+			if (arg === "revoke") {
+				const workerId = tail.split(/\s+/)[0];
+				if (!workerId) {
+					ctx.ui?.notify("mqtt: /mqtt revoke <worker>", "warning");
+					return;
+				}
+				if (!pairing) {
+					ctx.ui?.notify("mqtt: not connected — /mqtt connect first", "warning");
+					return;
+				}
+				const outcome = pairing.revoke(workerId);
+				ctx.ui?.notify(outcome.ok ? `mqtt: revoked "${workerId}"` : `mqtt: ${outcome.error}`, outcome.ok ? "info" : "error");
+				pushNow();
+				return;
+			}
+			if (arg === "trusted") {
+				const trusted = pairing?.trusted() ?? [];
+				ctx.ui?.notify(
+					trusted.length === 0
+						? "mqtt: no worker key is approved by this phone yet"
+						: `approved:\n${trusted.map((worker) => `  ${worker.workerId} · ${worker.fingerprint}`).join("\n")}`,
+					"info",
+				);
 				return;
 			}
 			if (arg === "setup") {
@@ -797,340 +1031,14 @@ function registerCommand(): void {
 				return;
 			}
 			ctx.ui?.notify(
-				"mqtt: /mqtt status · connect · disconnect · workers · tasks · forget <id> · setup · password · notify on|off · app",
+				"mqtt: /mqtt status · connect · disconnect · workers · tasks · pending · admit <worker> <code> · revoke <worker> · trusted · forget <id> · setup · password · notify on|off · app",
 				"info",
 			);
 		},
 	});
 }
 
-// ---------------------------------------------------------------------------
-// The app page
-// ---------------------------------------------------------------------------
-
-export function appHtml(state: unknown): string {
-	const initial = JSON.stringify(state ?? null).replace(/</g, "\\u003c");
-	return `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<style>
-  :root {
-    color-scheme: light dark;
-    --bg: #f2f2f7; --card: #ffffff; --text: #111114; --muted: #6b6b73; --line: rgba(0,0,0,.08);
-    --accent: #0a84ff; --good: #1fa971; --warn: #d98216; --bad: #d7263d; --chip: rgba(120,120,128,.14);
-    --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
-  }
-  @media (prefers-color-scheme: dark) {
-    :root { --bg: #0e0e10; --card: #1c1c1f; --text: #f5f5f7; --muted: #9a9aa2; --line: rgba(255,255,255,.09); --chip: rgba(120,120,128,.24); }
-  }
-  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-  html, body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.4 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif; }
-  body { padding: max(14px, env(safe-area-inset-top)) 16px max(28px, env(safe-area-inset-bottom)); }
-  header { margin-bottom: 6px; }
-  .hrow { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
-  h1 { font-size: 26px; letter-spacing: -.02em; margin: 0; }
-  .sub { color: var(--muted); font-size: 12.5px; margin-top: 2px; font-family: var(--mono); word-break: break-all; }
-  .actions { display: flex; align-items: center; gap: 8px; }
-  .pill { border: 0; border-radius: 999px; padding: 8px 14px; font-size: 13px; font-weight: 600; color: #fff; background: var(--accent); }
-  .pill.off { background: var(--chip); color: var(--text); }
-  .icon { border: 0; width: 34px; height: 34px; border-radius: 10px; background: var(--chip); color: var(--text); font-size: 17px; }
-  .status { display: flex; align-items: center; gap: 7px; margin: 12px 0 18px; color: var(--muted); font-size: 13px; }
-  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
-  .dot.online { background: var(--good); box-shadow: 0 0 0 4px rgba(31,169,113,.16); }
-  .dot.connecting { background: var(--warn); }
-  .dot.offline { background: #8e8e93; }
-  section { margin-bottom: 22px; }
-  .shead { display: flex; align-items: baseline; justify-content: space-between; margin: 0 2px 8px; }
-  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .07em; color: var(--muted); margin: 0; }
-  .count { font-size: 12px; color: var(--muted); }
-  .list { display: flex; flex-direction: column; gap: 8px; }
-  .card { background: var(--card); border-radius: 14px; padding: 12px 14px; border: 1px solid var(--line); }
-  .row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-  .wid { font-weight: 650; font-size: 15.5px; }
-  .chip { font-size: 11.5px; font-weight: 650; padding: 3px 9px; border-radius: 999px; background: var(--chip); color: var(--muted); text-transform: lowercase; }
-  .chip.idle { color: var(--good); background: rgba(31,169,113,.14); }
-  .chip.busy { color: var(--warn); background: rgba(217,130,22,.16); }
-  .chip.offline, .chip.offline\\? { color: #8e8e93; }
-  .chip.done { color: var(--good); background: rgba(31,169,113,.14); }
-  .chip.error, .chip.timeout, .chip.lost, .chip.cancelled { color: var(--bad); background: rgba(215,38,61,.14); }
-  .chip.sent, .chip.running, .chip.queued { color: var(--accent); background: rgba(10,132,255,.14); }
-  .meta { color: var(--muted); font-size: 12.5px; margin-top: 4px; }
-  .meta.busyline { color: var(--warn); }
-  .cwd { color: var(--muted); font-size: 11.5px; margin-top: 4px; opacity: .8; word-break: break-all; }
-  .mono { font-family: var(--mono); }
-  .cardfoot { margin-top: 10px; display: flex; gap: 8px; }
-  .ghost { flex: 1; border: 1px solid var(--line); background: transparent; color: var(--accent); font-weight: 600; font-size: 13px; padding: 8px 10px; border-radius: 10px; }
-  .ghost.danger { color: var(--bad); }
-  .empty { background: var(--card); border: 1px dashed var(--line); color: var(--muted); border-radius: 14px; padding: 16px; font-size: 13px; text-align: center; }
-  .task .detail { margin-top: 6px; color: var(--text); font-size: 13px; white-space: pre-wrap; word-break: break-word; }
-  .task .detail.clamped { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
-  .log { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 10px 12px; font-family: var(--mono); font-size: 11.5px; color: var(--muted); max-height: 150px; overflow: auto; }
-  .log div { padding: 1px 0; }
-  .log .warn { color: var(--warn); } .log .error { color: var(--bad); }
-  .sheet { position: fixed; inset: 0; background: rgba(0,0,0,.34); display: flex; align-items: flex-end; z-index: 20; padding: 0; }
-  .sheet.hidden { display: none; }
-  .panel { width: 100%; background: var(--card); border-radius: 20px 20px 0 0; padding: 18px 16px max(18px, env(safe-area-inset-bottom)); }
-  .panel h3 { margin: 0 0 2px; font-size: 18px; }
-  .panel .hint { color: var(--muted); font-size: 12.5px; margin-bottom: 12px; }
-  textarea, input[type=text] { width: 100%; border: 1px solid var(--line); background: var(--bg); color: var(--text); border-radius: 12px; padding: 11px 12px; font: inherit; font-size: 15px; resize: vertical; }
-  textarea { min-height: 108px; }
-  label.field { display: block; margin-bottom: 10px; }
-  label.field span { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; text-transform: uppercase; letter-spacing: .05em; }
-  .panel .btns { display: flex; gap: 8px; margin-top: 12px; }
-  .primary { flex: 1; border: 0; border-radius: 12px; padding: 12px; font-weight: 650; font-size: 15px; color: #fff; background: var(--accent); }
-  .secondary { flex: 1; border: 1px solid var(--line); border-radius: 12px; padding: 12px; font-weight: 600; font-size: 15px; color: var(--text); background: transparent; }
-  .switchrow { display: flex; align-items: center; justify-content: space-between; padding: 8px 0; }
-  .toast { position: fixed; left: 50%; bottom: max(22px, env(safe-area-inset-bottom)); transform: translateX(-50%) translateY(20px); background: rgba(30,30,32,.94); color: #fff; font-size: 13px; padding: 10px 16px; border-radius: 999px; opacity: 0; transition: opacity .18s, transform .18s; pointer-events: none; max-width: 88%; text-align: center; }
-  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
-  input[type=checkbox] { width: 22px; height: 22px; accent-color: var(--accent); }
-</style>
-</head>
-<body>
-<header>
-  <div class="hrow">
-    <div>
-      <h1>MQTT</h1>
-      <div class="sub" id="sub"></div>
-    </div>
-    <div class="actions">
-      <button class="pill" id="power">Connect</button>
-      <button class="icon" id="gear" aria-label="Settings">&#9881;</button>
-    </div>
-  </div>
-  <div class="status"><span class="dot" id="dot"></span><span id="statusText">offline</span></div>
-</header>
-<main>
-  <section>
-    <div class="shead"><h2>Workers</h2><span class="count" id="wcount"></span></div>
-    <div class="list" id="workers"></div>
-  </section>
-  <section>
-    <div class="shead"><h2>Tasks</h2><span class="count" id="tcount"></span></div>
-    <div class="list" id="tasks"></div>
-  </section>
-  <section>
-    <div class="shead"><h2>Log</h2></div>
-    <div class="log" id="log"></div>
-  </section>
-</main>
-
-<div class="sheet hidden" id="composer">
-  <div class="panel">
-    <h3 id="composerTitle">Send a task</h3>
-    <div class="hint" id="composerHint">The worker runs this in its own pi session on its own machine.</div>
-    <textarea id="prompt" placeholder="What should it do? Say what done looks like."></textarea>
-    <div class="switchrow"><span>Start a turn here when the result lands</span><input type="checkbox" id="wake"></div>
-    <div class="btns">
-      <button class="secondary" id="cancelComposer">Cancel</button>
-      <button class="primary" id="send">Send</button>
-    </div>
-  </div>
-</div>
-
-<div class="sheet hidden" id="settings">
-  <div class="panel">
-    <h3>Settings</h3>
-    <div class="hint">Synced across your devices. The password lives in the Keychain, never in this page.</div>
-    <label class="field"><span>Broker (WebSocket)</span><input type="text" id="fUrl" autocapitalize="off" autocorrect="off" spellcheck="false"></label>
-    <label class="field"><span>Room</span><input type="text" id="fRoom" autocapitalize="off" autocorrect="off" spellcheck="false"></label>
-    <label class="field"><span>This phone's name</span><input type="text" id="fName" autocapitalize="off" autocorrect="off" spellcheck="false"></label>
-    <label class="field"><span>Broker user</span><input type="text" id="fUser" autocapitalize="off" autocorrect="off" spellcheck="false"></label>
-    <div class="switchrow"><span>Notify me when a task finishes</span><input type="checkbox" id="fNotify"></div>
-    <div class="btns">
-      <button class="secondary" id="password">Set password</button>
-      <button class="primary" id="save">Save</button>
-    </div>
-    <div class="btns"><button class="secondary" id="closeSettings">Close</button></div>
-  </div>
-</div>
-
-<div class="toast" id="toast"></div>
-<script id="initial" type="application/json">__INITIAL__</script>
-<script>
-(function () {
-  var initial = null;
-  try { initial = JSON.parse(document.getElementById("initial").textContent || "null"); } catch (e) {}
-  var snap = (pi.state.get && pi.state.get()) || initial || { status: "offline", workers: [], tasks: [], log: [], settings: {} };
-  var composerTo = null;
-
-  function $(id) { return document.getElementById(id); }
-  function esc(v) {
-    return String(v == null ? "" : v).replace(/[&<>"']/g, function (c) {
-      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
-    });
-  }
-  var toastTimer = null;
-  function toast(text) {
-    var el = $("toast");
-    el.textContent = text;
-    el.classList.add("show");
-    if (toastTimer) clearTimeout(toastTimer);
-    toastTimer = setTimeout(function () { el.classList.remove("show"); }, 2400);
-  }
-
-  function renderHeader() {
-    var online = snap.status === "online";
-    $("power").textContent = online ? "Disconnect" : "Connect";
-    $("power").className = "pill" + (online ? "" : " off");
-    var dot = $("dot");
-    dot.className = "dot " + (snap.status || "offline");
-    $("sub").textContent = (snap.me ? snap.me + " · " : "") + (snap.room || "") + " · " + (snap.url || "");
-    var text = snap.status || "offline";
-    if (snap.lastError && !online) text += " · last drop " + snap.lastError;
-    else if (snap.hasPassword === false) text += " · no room password yet";
-    $("statusText").textContent = text;
-  }
-
-  function renderWorkers() {
-    var list = snap.workers || [];
-    $("wcount").textContent = list.length ? String(list.length) : "";
-    if (!list.length) {
-      $("workers").innerHTML = '<div class="empty">No workers in this room yet.<br><span class="mono">pi --pi-mqtt-role worker --name lap-b</span></div>';
-      return;
-    }
-    var html = "";
-    list.forEach(function (w) {
-      var state = w.stale ? w.state + "?" : w.state;
-      var repo = w.repo ? w.repo + (w.branch ? "@" + w.branch : "") : "";
-      html += '<div class="card">'
-        + '<div class="row"><span class="wid">' + esc(w.id) + '</span><span class="chip ' + esc(state) + '">' + esc(state) + '</span></div>'
-        + '<div class="meta">' + esc([repo, w.model, w.age].filter(Boolean).join(" · ")) + '</div>'
-        + (w.activeTaskId ? '<div class="meta busyline">working on ' + esc(w.activeTaskId) + '</div>' : '')
-        + (w.cwd ? '<div class="cwd mono">' + esc(w.cwd) + '</div>' : '')
-        + '<div class="cardfoot"><button class="ghost" data-action="compose" data-worker="' + esc(w.id) + '">Send a task</button></div>'
-        + '</div>';
-    });
-    $("workers").innerHTML = html;
-  }
-
-  function renderTasks() {
-    var list = snap.tasks || [];
-    $("tcount").textContent = list.length ? String(list.length) : "";
-    if (!list.length) {
-      $("tasks").innerHTML = '<div class="empty">Nothing dispatched from this phone yet. Tap a worker above.</div>';
-      return;
-    }
-    var html = "";
-    list.forEach(function (t) {
-      var running = t.state === "queued" || t.state === "sent" || t.state === "running";
-      html += '<div class="card task" data-task="' + esc(t.taskId) + '">'
-        + '<div class="row"><span class="wid mono" style="font-size:12.5px">' + esc(t.taskId) + '</span><span class="chip ' + esc(t.state) + '">' + esc(t.state) + '</span></div>'
-        + '<div class="meta">' + esc(t.to + " · " + t.age + (t.duration ? " · took " + t.duration : "")) + '</div>'
-        + (t.detail ? '<div class="detail clamped">' + esc(t.detail) + '</div>' : '')
-        + (running ? '<div class="cardfoot"><button class="ghost danger" data-action="cancel" data-task="' + esc(t.taskId) + '">Cancel</button></div>' : '')
-        + '</div>';
-    });
-    $("tasks").innerHTML = html;
-  }
-
-  function renderLog() {
-    var list = (snap.log || []).slice(-12);
-    if (!list.length) { $("log").innerHTML = '<div>quiet</div>'; return; }
-    $("log").innerHTML = list.map(function (line) {
-      var t = new Date(line.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-      return '<div class="' + esc(line.level) + '">' + esc(t) + "  " + esc(line.message) + '</div>';
-    }).join("");
-  }
-
-  function renderSettings() {
-    var s = snap.settings || {};
-    if (document.activeElement && document.activeElement.tagName === "INPUT") return;
-    $("fUrl").value = s.url || "";
-    $("fRoom").value = s.room || "";
-    $("fName").value = s.name || "";
-    $("fUser").value = s.username || "cluster";
-    $("fNotify").checked = s.notify === true;
-  }
-
-  function render() {
-    renderHeader();
-    renderWorkers();
-    renderTasks();
-    renderLog();
-    if ($("settings").classList.contains("hidden") === false) renderSettings();
-  }
-
-  function openComposer(worker) {
-    composerTo = worker;
-    $("composerTitle").textContent = "Send to " + worker;
-    $("composerHint").textContent = "The worker runs this in its own pi session on its own machine.";
-    $("prompt").value = "";
-    $("wake").checked = false;
-    $("composer").classList.remove("hidden");
-    setTimeout(function () { $("prompt").focus(); }, 60);
-  }
-  function closeComposer() { $("composer").classList.add("hidden"); composerTo = null; }
-  function openSettings() { renderSettings(); $("settings").classList.remove("hidden"); }
-  function closeSettings() { $("settings").classList.add("hidden"); }
-
-  $("power").addEventListener("click", function () {
-    if (snap.status === "online") { pi.post({ type: "disconnect" }); toast("leaving the room"); }
-    else { toast("connecting…"); pi.post({ type: "connect" }); }
-  });
-  $("gear").addEventListener("click", openSettings);
-  $("cancelComposer").addEventListener("click", closeComposer);
-  $("closeSettings").addEventListener("click", closeSettings);
-  $("password").addEventListener("click", function () { pi.post({ type: "password" }); });
-  $("save").addEventListener("click", function () {
-    pi.post({
-      type: "settings",
-      settings: {
-        url: $("fUrl").value.trim(),
-        room: $("fRoom").value.trim(),
-        name: $("fName").value.trim(),
-        username: $("fUser").value.trim(),
-        notify: $("fNotify").checked
-      }
-    });
-    closeSettings();
-    toast("saved");
-  });
-  $("send").addEventListener("click", function () {
-    var prompt = $("prompt").value.trim();
-    if (!prompt || !composerTo) return;
-    pi.post({ type: "dispatch", to: composerTo, prompt: prompt, wake: $("wake").checked });
-    toast("sent to " + composerTo);
-    closeComposer();
-  });
-  $("composer").addEventListener("click", function (event) { if (event.target === $("composer")) closeComposer(); });
-  $("settings").addEventListener("click", function (event) { if (event.target === $("settings")) closeSettings(); });
-
-  document.addEventListener("click", function (event) {
-    var target = event.target;
-    var action = target.closest ? target.closest("[data-action]") : null;
-    if (action) {
-      event.stopPropagation();
-      var kind = action.getAttribute("data-action");
-      if (kind === "compose") openComposer(action.getAttribute("data-worker"));
-      if (kind === "cancel") { pi.post({ type: "cancel", taskId: action.getAttribute("data-task") }); toast("cancel requested"); }
-      return;
-    }
-    var card = target.closest ? target.closest("[data-task]") : null;
-    if (card) {
-      var detail = card.querySelector(".detail");
-      if (detail) detail.classList.toggle("clamped");
-    }
-  });
-
-  pi.onMessage(function (message) {
-    if (!message) return;
-    if (message.type === "snapshot" && message.snapshot) {
-      snap = message.snapshot;
-      if (pi.state.set) pi.state.set(snap);
-      render();
-      return;
-    }
-    if (message.type === "toast") toast(message.text || "");
-  });
-
-  render();
-})();
-</script>
-</body>
-</html>`.replace("__INITIAL__", () => initial);
-}
+// The app page lives in src/page.ts (one document, no libraries).
 
 async function openApp(): Promise<void> {
 	if (!appHandle) {
@@ -1223,6 +1131,20 @@ function registerApp(): void {
 						pushNow();
 					}
 				})();
+				return;
+			}
+			if (kind === "admit") {
+				const worker = sanitizeId(String(data.worker ?? ""));
+				const outcome = pairing?.admit(worker, String(data.code ?? ""));
+				app?.post({ type: "toast", text: outcome?.ok ? `approved ${worker}` : outcome?.error ?? "not connected" });
+				pushNow();
+				return;
+			}
+			if (kind === "revoke") {
+				const worker = sanitizeId(String(data.worker ?? ""));
+				const outcome = pairing?.revoke(worker);
+				app?.post({ type: "toast", text: outcome?.ok ? `revoked ${worker}` : outcome?.error ?? "not connected" });
+				pushNow();
 				return;
 			}
 			if (kind === "refresh") {

@@ -97,7 +97,7 @@ ask lap-b to run the test suite and summarise what failed
 | `mqtt_result` | Full result for a task id: final text, diffstat, patch path, worker session file |
 | `mqtt_tasks` | Task states: queued, sent, running, done, error, timeout, cancelled, lost |
 | `mqtt_cancel` | Cooperative abort; the worker reports partial output |
-| `mqtt_forget` | Delete the retained presence of sessions that are gone (a dead worker, a renamed session) |
+| `mqtt_pair` | Worker admission: `pending` codes, `admit` by code, `revoke`, `trusted` |
 | `mqtt_status` | Broker, room, device name, link state, reachable workers |
 
 | Command | What it does |
@@ -105,15 +105,44 @@ ask lap-b to run the test suite and summarise what failed
 | `/mqtt status` | Configuration and link state |
 | `/mqtt connect` / `/mqtt disconnect` | Join or leave the room |
 | `/mqtt workers` / `/mqtt tasks` | The roster and this phone's tasks |
-| `/mqtt setup` | URL, room, phone name |
+| `/mqtt pending` / `/mqtt admit <worker> <code>` | Codes waiting for approval, and approving one |
+| `/mqtt trusted` / `/mqtt revoke <worker>` | The approved keys, and dropping one |
+| `/mqtt setup` | URL, room, phone name, broker user |
 | `/mqtt password` | Store the room password in the Keychain |
-| `/mqtt forget <id>[,<id>]` | Clear retained presence of sessions that are gone |
 | `/mqtt notify on\|off` | Phone notification when a task finishes |
 | `/mqtt app` | Open the MQTT app |
 
 `mqtt_dispatch` takes the same options as the desktop tool: `notify: "silent" |
 "wake"`, `ifBusy: "fail" | "wait"`, `waitTimeoutMs`, `timeoutMs`, `maxCostUsd`,
 `model`, and `repo: { baseRef | baseSha, branch }`.
+
+## Approving workers
+
+A worker joins as **`pending`**: the broker no longer decides *which machine* is answering
+to a worker id, so the orchestrator does. The worker advertises a long-term Ed25519 key
+and signs a join nonce; this phone answers with a challenge nonce, and both ends derive
+the same six-digit code from the two nonces and the worker key.
+
+- the code appears here (the MQTT app, `mqtt_workers`, `/mqtt pending`, and a log line);
+  compare it with the one on the worker's screen — a squatter wearing the same id holds
+  a different key and shows a different code
+- approve it with the **Approve** button in the app, `/mqtt admit <worker> <code>`, or
+  `mqtt_pair`
+- the approval is pinned to the *key* in `pi.synced` (`trusted:<room>`), so a returning
+  worker is admitted without a human: restarts, reloads and sleeps do not turn it back
+  into a stranger; `/mqtt revoke <worker>` sends it back to `pending`
+- `mqtt_dispatch` refuses a pending or unapproved worker and says which command to run
+
+The proof is checked with WebCrypto Ed25519 (`node:crypto` on iOS has no `verify`), and
+the code and fingerprint are byte-for-byte the desktop's algorithms (`src/protocol.ts`).
+
+## Roles are credentials
+
+The broker grants a role per credential (`PI_MQTT_USERS`, e.g. `tribe:…:orchestrator:dev`;
+see `deploy/README.md`). This phone must therefore connect with the **orchestrator**
+credential: its user name in `/mqtt setup` (or the app's *Broker user*) and its password
+in the Keychain (`/mqtt password`). A worker credential is refused at CONNACK, and the
+error names the reason instead of showing a silent, frozen roster.
 
 ## Protocol parity
 
@@ -145,24 +174,24 @@ The phone:
 - **Orchestrator only.** The phone dispatches; it does not accept tasks. A worker
   is expected to have the repo and a shell where the work happens.
 - **No background connection.** iOS suspends the engine, so the socket and the
-  room membership go with it — that is a normal drop, not a fault, so it is logged
-  (app → Log, `mqtt_status`) rather than raised as a notification. Opening the app
-  or using a tool reconnects, and a tool that arrives mid-reconnect waits a few
-  seconds for the link instead of failing. Nothing is lost while it is away: tasks
-  and results live on the broker/worker side.
+  room membership go with it. Opening the app or using a tool reconnects; nothing
+  is lost, since tasks and results live on the broker/worker side while it is away.
 - **No MQTT 5 message expiry.** Presence is retained and cleared on a clean leave
   or replaced with `offline` by the Will on a crash; a worker that died long ago can
   linger until something overwrites it (the roster marks it stale after three missed
   heartbeats).
-- **`/mqtt kick` is cooperative**, exactly as on the desktop: the password is the
-  capability. Anyone in the room can dispatch to any worker. Treat the room password
-  like SSH access to all those machines.
+- **Roles and keys are the capabilities**, exactly as on the desktop: only an
+  orchestrator credential may dispatch or kick, and only a key this phone approved may
+  take a task. The worker credential is still shared by the room's workers, so treat it
+  like shell access to all those machines, and the orchestrator credential like dispatch
+  rights to all of them.
 
 ## Troubleshooting
 
 | What you see | What it means |
 |---|---|
-| `refused: not authorised` | The room password does not match `PI_MQTT_USERS` on the broker. `/mqtt password` |
+| `refused: not authorised` | This credential is not an orchestrator credential on the broker (`PI_MQTT_USERS`): check the broker user in `/mqtt setup` and the password with `/mqtt password` |
+| `worker "x" is waiting for approval` | A new worker joined as `pending`: compare its code with the worker's screen, then `/mqtt admit x <code>` |
 | `the broker must be a WebSocket URL` | Point at `wss://host/mqtt` (the websockets listener), not `mqtts://host:8883` |
 | `unknown worker "x"` | Nothing in the roster under that id: check `mqtt_workers`, and that the worker session is named and connected |
 | `worker "x" is stale` | Last heartbeat older than 3 × `heartbeatMs` — the machine is asleep or the link there died |

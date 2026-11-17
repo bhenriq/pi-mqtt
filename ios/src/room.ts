@@ -15,6 +15,7 @@ import {
 	isPresence,
 	isResult,
 	parseJson,
+	formatPairingCode,
 	type PresenceIdentity,
 	type PresenceMessage,
 	type RepoSpec,
@@ -24,6 +25,7 @@ import {
 	type Topics,
 	type WorkerState,
 } from "./protocol.ts";
+import type { Pairing } from "./pairing.ts";
 import { formatAge, newTaskId, type LogFn } from "./util.ts";
 
 const STALE_FACTOR = 3;
@@ -92,6 +94,8 @@ export class Room {
 		private readonly onChange: () => void,
 		private readonly onFinished: (record: TaskRecord) => void,
 		private readonly onKick: (from: string, reason?: string) => void,
+		/** Worker admission; without it every worker is treated as dispatchable. */
+		private readonly pairing?: Pairing,
 	) {
 		this.current = buildPresence(identity, "idle", "orchestrator");
 	}
@@ -110,6 +114,9 @@ export class Room {
 				this.workers.set(decoded.workerId, decoded);
 				this.gotPresence = true;
 				this.lastPresenceAt = Date.now();
+				// A worker that has not been approved yet is not dispatchable: answer its
+				// join (silently if the key is known, with a code if it is not).
+				this.pairing?.consider(decoded);
 				this.onWorkerState(decoded.workerId);
 				this.onChange();
 			}),
@@ -213,6 +220,7 @@ export class Room {
 		this.leaving = options.quiet === true;
 		if (this.heartbeat) clearInterval(this.heartbeat);
 		this.heartbeat = undefined;
+		this.pairing?.stop();
 		for (const unsubscribe of this.unsubscribes) unsubscribe();
 		this.unsubscribes.length = 0;
 		for (const timer of this.ackTimers.values()) clearTimeout(timer);
@@ -268,6 +276,23 @@ export class Room {
 		}
 		const entry = this.entries().find((item) => item.presence.workerId === params.to);
 		if (!entry) return { ok: false, error: `unknown worker "${params.to}" (try /mqtt workers)` };
+		if (entry.presence.state === "pending") {
+			const code = this.pairing?.codeFor(params.to);
+			const hint = code ? ` (code ${formatPairingCode(code)})` : "";
+			return {
+				ok: false,
+				error: `worker "${params.to}" is waiting for approval${hint}: compare the code with the worker's screen, then /mqtt admit ${params.to} <code>`,
+			};
+		}
+		if (this.pairing && !this.pairing.isApproved(entry.presence)) {
+			return {
+				ok: false,
+				error:
+					typeof entry.presence.key === "string"
+						? `worker "${params.to}" is not approved by this phone: /mqtt admit ${params.to} <code> once its code appears`
+						: `worker "${params.to}" advertises no identity key (older pi-mqtt): update it, then approve its code`,
+			};
+		}
 		if (entry.stale) {
 			return { ok: false, error: `worker "${params.to}" is stale (last heartbeat ${Math.round(entry.ageMs / 1000)}s ago)` };
 		}

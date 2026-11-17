@@ -27,6 +27,13 @@ export interface Snapshot {
 		id: string;
 		state: string;
 		stale: boolean;
+		/** Joined but not approved by this phone: not dispatchable. */
+		pending?: boolean;
+		/** Approved by this phone (its key is on file). */
+		approved?: boolean;
+		/** The six digits to compare with the worker's screen, while pending. */
+		code?: string;
+		fingerprint?: string;
 		repo?: string;
 		branch?: string;
 		model?: string;
@@ -102,6 +109,9 @@ export function appHtml(state: unknown): string {
   .chip.done { color: var(--good); background: rgba(31,169,113,.14); }
   .chip.error, .chip.timeout, .chip.lost, .chip.cancelled { color: var(--bad); background: rgba(215,38,61,.14); }
   .chip.sent, .chip.running, .chip.queued { color: var(--accent); background: rgba(10,132,255,.14); }
+  .chip.pending { color: var(--warn); background: rgba(217,130,22,.16); }
+  .code { font-family: var(--mono); font-size: 19px; letter-spacing: .10em; font-weight: 600; color: var(--warn); margin-top: 4px; }
+  .code .hint { font-family: -apple-system, system-ui, sans-serif; font-size: 11.5px; letter-spacing: 0; font-weight: 400; color: var(--muted); display: block; margin-top: 2px; }
   .meta { color: var(--muted); font-size: 12.5px; margin-top: 4px; }
   .meta.busyline { color: var(--warn); }
   .cwd { color: var(--muted); font-size: 11.5px; margin-top: 4px; opacity: .8; word-break: break-all; }
@@ -182,7 +192,7 @@ export function appHtml(state: unknown): string {
     <label class="field"><span>Broker (WebSocket)</span><input type="text" id="fUrl" autocapitalize="off" autocorrect="off" spellcheck="false"></label>
     <label class="field"><span>Room</span><input type="text" id="fRoom" autocapitalize="off" autocorrect="off" spellcheck="false"></label>
     <label class="field"><span>This phone's name</span><input type="text" id="fName" autocapitalize="off" autocorrect="off" spellcheck="false"></label>
-    <label class="field"><span>Broker user</span><input type="text" id="fUser" autocapitalize="off" autocorrect="off" spellcheck="false"></label>
+    <label class="field"><span>Broker user (orchestrator role)</span><input type="text" id="fUser" autocapitalize="off" autocorrect="off" spellcheck="false"></label>
     <div class="switchrow"><span>Notify me when a task finishes</span><input type="checkbox" id="fNotify"></div>
     <div class="btns">
       <button class="secondary" id="password">Set password</button>
@@ -240,12 +250,31 @@ export function appHtml(state: unknown): string {
     list.forEach(function (w) {
       var state = w.stale ? w.state + "?" : w.state;
       var repo = w.repo ? w.repo + (w.branch ? "@" + w.branch : "") : "";
+      var foot;
+      if (w.pending) {
+        foot = '<div class="cardfoot">'
+          + (w.code ? '<button class="ghost" data-action="admit" data-worker="' + esc(w.id) + '" data-code="' + esc(w.code) + '">Approve</button>' : '')
+          + '<button class="ghost danger" data-action="revoke" data-worker="' + esc(w.id) + '">Deny</button>'
+          + '</div>';
+      } else {
+        foot = '<div class="cardfoot">'
+          + '<button class="ghost" data-action="compose" data-worker="' + esc(w.id) + '">Send a task</button>'
+          + (w.approved ? '<button class="ghost danger" data-action="revoke" data-worker="' + esc(w.id) + '">Revoke</button>' : '')
+          + '</div>';
+      }
       html += '<div class="card">'
         + '<div class="row"><span class="wid">' + esc(w.id) + '</span><span class="chip ' + esc(state) + '">' + esc(state) + '</span></div>'
-        + '<div class="meta">' + esc([repo, w.model, w.age].filter(Boolean).join(" · ")) + '</div>'
+        + '<div class="meta">' + esc([repo, w.model, w.age, w.fingerprint].filter(Boolean).join(" · ")) + '</div>'
+        + (w.pending
+          ? (w.approved
+              ? '<div class="meta busyline">approved — it becomes idle on its next beat</div>'
+              : (w.code
+                  ? '<div class="code">' + esc(w.code.slice(0, 3) + " " + w.code.slice(3)) + '<span class="hint">Compare this with the code on the worker’s screen, then approve.</span></div>'
+                  : '<div class="meta busyline">waiting for an orchestrator to offer a code…</div>'))
+          : '')
         + (w.activeTaskId ? '<div class="meta busyline">working on ' + esc(w.activeTaskId) + '</div>' : '')
         + (w.cwd ? '<div class="cwd mono">' + esc(w.cwd) + '</div>' : '')
-        + '<div class="cardfoot"><button class="ghost" data-action="compose" data-worker="' + esc(w.id) + '">Send a task</button></div>'
+        + foot
         + '</div>';
     });
     $("workers").innerHTML = html;
@@ -286,7 +315,7 @@ export function appHtml(state: unknown): string {
     $("fUrl").value = s.url || "";
     $("fRoom").value = s.room || "";
     $("fName").value = s.name || "";
-    $("fUser").value = s.username || "cluster";
+    $("fUser").value = s.username || "";
     $("fNotify").checked = s.notify === true;
   }
 
@@ -351,6 +380,14 @@ export function appHtml(state: unknown): string {
       var kind = action.getAttribute("data-action");
       if (kind === "compose") openComposer(action.getAttribute("data-worker"));
       if (kind === "cancel") { pi.post({ type: "cancel", taskId: action.getAttribute("data-task") }); toast("cancel requested"); }
+      if (kind === "admit") {
+        pi.post({ type: "admit", worker: action.getAttribute("data-worker"), code: action.getAttribute("data-code") });
+        toast("approving…");
+      }
+      if (kind === "revoke") {
+        pi.post({ type: "revoke", worker: action.getAttribute("data-worker") });
+        toast("revoking…");
+      }
       return;
     }
     var card = target.closest ? target.closest("[data-task]") : null;

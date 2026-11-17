@@ -107,7 +107,7 @@ function describeConnack(code: number): string {
 		case 4:
 			return "refused: bad username or password";
 		case 5:
-			return "refused: not authorised — the room password does not match the broker's";
+			return "refused: not authorised — the broker grants a role per credential, so this needs an orchestrator credential (room password plus the broker user that carries the orchestrator role, /mqtt setup)";
 		default:
 			return `refused: CONNACK ${code}`;
 	}

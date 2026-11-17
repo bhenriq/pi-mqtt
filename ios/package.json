@@ -1,6 +1,6 @@
 {
   "name": "pi-mqtt-ios",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "description": "pi-mqtt for pi on iOS: drive named pi workers over MQTT from your phone",
   "keywords": ["pi-package", "mqtt", "ios", "orchestration"],
