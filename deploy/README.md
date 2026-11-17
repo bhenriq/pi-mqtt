@@ -41,6 +41,8 @@ What the broker now separates:
 | | orchestrator credential | worker credential |
 |---|---|---|
 | write `workers/<id>/ctl` (dispatch) | yes | **no** |
+| write `workers/<id>/pair` (admission) | yes | **no** |
+| read `workers/<id>/pair` | no | yes |
 | write `control` (kick) | yes | **no** |
 | read `results/+` | yes | **no** (subscribe is granted, delivery is filtered) |
 | read `workers/+/presence`, `workers/+/ack` | yes | no |

@@ -150,6 +150,7 @@ LEGACY
 # $user: orchestrator in room "$room" — dispatches, kicks, reads results.
 user $user
 topic write pi/v1/$room/workers/+/ctl
+topic write pi/v1/$room/workers/+/pair
 topic read pi/v1/$room/workers/+/presence
 topic read pi/v1/$room/workers/+/ack
 topic readwrite pi/v1/$room/control
@@ -166,6 +167,7 @@ ORCH
 # worker's presence entry.
 user $user
 topic read pi/v1/$room/workers/+/ctl
+topic read pi/v1/$room/workers/+/pair
 topic readwrite pi/v1/$room/workers/+/presence
 topic write pi/v1/$room/workers/+/ack
 topic write pi/v1/$room/results/+

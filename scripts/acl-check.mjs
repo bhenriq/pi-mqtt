@@ -110,6 +110,7 @@ const workerClient = await open(worker, "worker");
 current = "orchestrator: ";
 expect("may dispatch to a worker", await allows(orchClient, `${base}/workers/${workerId}/ctl`));
 expect("may kick (room control)", await allows(orchClient, `${base}/control`));
+expect("may answer a join (pair channel)", await allows(orchClient, `${base}/workers/${workerId}/pair`));
 expect("may not impersonate a worker's presence", await denies(orchClient, `${base}/workers/${workerId}/presence`));
 expect("may not publish outside its room", await denies(orchClient, `${other}/workers/${workerId}/ctl`));
 
@@ -121,6 +122,9 @@ expect("may report a result", await allows(workerClient, `${base}/results/t_${ra
 expect("may not dispatch, even to itself", await denies(workerClient, `${base}/workers/${workerId}/ctl`));
 expect("may not dispatch to another worker", await denies(workerClient, `${base}/workers/other/ctl`));
 expect("may not kick the room", await denies(workerClient, `${base}/control`));
+expect("may not answer a join (pair channel)", await denies(workerClient, `${base}/workers/${workerId}/pair`));
+const readPair = await subscribe(workerClient, `${base}/workers/${workerId}/pair`);
+check("may read the pair channel", readPair.ok, readPair.ok ? "" : `code ${readPair.code}`);
 
 // --- read side ------------------------------------------------------------
 // Mosquitto grants a wildcard subscribe and enforces "read" when delivering, so the

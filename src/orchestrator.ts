@@ -6,12 +6,19 @@
  * it does not remember the intent.
  */
 
+import { randomBytes, timingSafeEqual } from "node:crypto";
+import { fingerprintOf, verifySignature } from "./identity.ts";
 import type { LogFn, MqttLink } from "./mqtt.ts";
 import {
+	formatPairingCode,
 	isAckMessage,
+	isPairMessage,
 	isPresenceMessage,
 	isResultMessage,
+	joinStatement,
 	newTaskId,
+	pairingCode,
+	type PairMessage,
 	type PresenceMessage,
 	type RepoSpec,
 	type ResultMessage,
@@ -19,6 +26,7 @@ import {
 	type TaskStatus,
 	type Topics,
 } from "./protocol.ts";
+import type { TrustStore } from "./trusted.ts";
 
 export const STALE_FACTOR = 3;
 /** A worker that never acknowledges is safe to re-send: it touched nothing. */
@@ -81,7 +89,26 @@ export interface OrchestratorOptions {
 	/** Called when a task reaches a terminal state, for digest delivery. */
 	onFinished: (record: TaskRecord) => void;
 	log: LogFn;
+	/** Who this orchestrator has approved for this room. */
+	trust: TrustStore;
+	/** This session's id, so a challenge names its issuer. */
+	orchestratorId: string;
+	/** Room name: part of the join statement, so a proof cannot be replayed elsewhere. */
+	room: string;
+	/** How long a pairing offer stays usable. */
+	pairingTtlMs?: number;
 }
+
+/** A `pending` joiner this orchestrator has offered a code for. */
+export interface PairingOffer {
+	workerId: string;
+	code: string;
+	expiresAt: number;
+	key: string;
+	orchestratorId: string;
+}
+
+const DEFAULT_PAIRING_TTL_MS = 10 * 60 * 1000;
 
 function clip(value: string, width: number): string {
 	const flat = value.replace(/\s+/g, " ");
@@ -96,6 +123,10 @@ export class Orchestrator {
 	}
 
 	private readonly workers = new Map<string, PresenceMessage>();
+	/** Offers by worker id, replaced when a join presents a new nonce. */
+	private readonly offers = new Map<string, PairingOffer & { workerNonce: string }>();
+	/** Joins already answered from the trusted list, so heartbeats do not re-answer. */
+	private readonly autoAdmitted = new Set<string>();
 	private readonly orchestrators = new Map<string, PresenceMessage>();
 	private readonly tasks = new Map<string, TaskRecord>();
 	private readonly unsubscribes: Array<() => void> = [];
@@ -121,6 +152,7 @@ export class Orchestrator {
 					return;
 				}
 				this.workers.set(payload.workerId, payload);
+				if (payload.state === "pending") this.considerJoiner(payload);
 				this.onWorkerState(payload.workerId);
 			}),
 			this.link.subscribe(this.topics.orchestratorFilter, (topic, payload) => {
@@ -192,6 +224,20 @@ export class Orchestrator {
 		}
 		const entry = this.entries().find((item) => item.presence.workerId === params.to);
 		if (!entry) return { ok: false, error: `unknown worker "${params.to}"` };
+		if (entry.presence.state === "pending") {
+			const offer = this.offers.get(params.to);
+			const hint = offer ? ` (code ${formatPairingCode(offer.code)})` : "";
+			return { ok: false, error: `worker "${params.to}" is waiting for approval${hint}: /mqtt admit ${params.to} <code>` };
+		}
+		if (!this.isApproved(entry.presence)) {
+			return {
+				ok: false,
+				error:
+					typeof entry.presence.key === "string"
+						? `worker "${params.to}" is not approved by this orchestrator: /mqtt admit ${params.to} <code> after its code appears`
+						: `worker "${params.to}" advertises no identity key (older pi-mqtt): update it, then approve its code`,
+			};
+		}
 		if (entry.stale) {
 			return { ok: false, error: `worker "${params.to}" is stale (last heartbeat ${Math.round(entry.ageMs / 1000)}s ago)` };
 		}
@@ -387,6 +433,131 @@ export class Orchestrator {
 			].join("  ");
 		});
 		return `${header}\n${rows.join("\n")}`;
+	}
+
+	/** Offers this orchestrator is waiting to have confirmed. */
+	pairingOffers(): PairingOffer[] {
+		const now = Date.now();
+		for (const [workerId, offer] of this.offers) {
+			if (offer.expiresAt <= now) this.offers.delete(workerId);
+		}
+		return [...this.offers.values()]
+			.map(({ workerId, code, expiresAt, key, orchestratorId }) => ({ workerId, code, expiresAt, key, orchestratorId }))
+			.sort((a, b) => a.workerId.localeCompare(b.workerId));
+	}
+
+	/** Who this orchestrator has approved for this room. */
+	trustedWorkers(): Array<{ workerId: string; fingerprint: string; admittedAt: number; admittedBy: string }> {
+		return this.options.trust.entries().map(({ workerId, fingerprint, admittedAt, admittedBy }) => ({
+			workerId,
+			fingerprint,
+			admittedAt,
+			admittedBy,
+		}));
+	}
+
+	isApproved(presence: PresenceMessage): boolean {
+		return typeof presence.key === "string" && this.options.trust.get(presence.workerId, presence.key) !== undefined;
+	}
+
+	/**
+	 * Confirm a pairing code and remember the worker's key.
+	 *
+	 * The human compares the code the worker shows with the one this orchestrator shows;
+	 * typing it here is what turns "some session called pru_misc joined" into "this key
+	 * is pru_misc, and it may be dispatched to".
+	 */
+	admit(workerId: string, code: string): { ok: boolean; error?: string } {
+		const offer = this.offers.get(workerId);
+		if (!offer) {
+			return { ok: false, error: `nothing is waiting for approval as "${workerId}"` };
+		}
+		if (offer.expiresAt <= Date.now()) {
+			this.offers.delete(workerId);
+			return { ok: false, error: `the code for "${workerId}" expired; it will be offered again on its next heartbeat` };
+		}
+		const typed = code.replace(/\s+/g, "");
+		if (typed.length !== offer.code.length || !timingSafeEqual(Buffer.from(typed), Buffer.from(offer.code))) {
+			return { ok: false, error: `wrong code for "${workerId}"` };
+		}
+		this.options.trust.admit(workerId, offer.key, this.options.orchestratorId);
+		this.offers.delete(workerId);
+		this.publishPair("admit", workerId, { fingerprint: fingerprintOf(offer.key) });
+		this.options.log("info", `approved ${workerId} (${fingerprintOf(offer.key)})`);
+		return { ok: true };
+	}
+
+	/** Stop trusting a worker: it goes back to `pending` on its next heartbeat. */
+	revoke(workerId: string): { ok: boolean; error?: string } {
+		const offer = this.offers.get(workerId);
+		this.offers.delete(workerId);
+		if (!this.options.trust.revoke(workerId) && !offer) {
+			return { ok: false, error: `"${workerId}" is not approved` };
+		}
+		this.publishPair("revoke", workerId);
+		this.options.log("info", `revoked ${workerId}`);
+		return { ok: true };
+	}
+
+	/**
+	 * React to a `pending` join: approve silently if the key is already on file, else
+	 * offer a code for a human to compare on both screens.
+	 */
+	private considerJoiner(presence: PresenceMessage): void {
+		const { workerId, nonce, key, proof } = presence;
+		if (typeof nonce !== "string" || typeof key !== "string" || typeof proof !== "string") {
+			this.options.log("warn", `worker ${workerId} is joining without a key or proof; ignoring`);
+			return;
+		}
+		const statement = joinStatement({ room: this.options.room, workerId, nonce, key });
+		if (!verifySignature(key, statement, proof)) {
+			this.options.log("warn", `worker ${workerId} presented a key it cannot prove it holds; ignoring`);
+			return;
+		}
+		if (this.options.trust.get(workerId, key)) {
+			// A known key: approve without a human, but once per join.
+			const joined = `${workerId}\n${nonce}`;
+			if (this.autoAdmitted.has(joined)) return;
+			this.autoAdmitted.add(joined);
+			if (this.autoAdmitted.size > 200) this.autoAdmitted.clear();
+			this.publishPair("admit", workerId, { fingerprint: fingerprintOf(key) });
+			this.options.log("info", `${workerId} rejoined with an approved key; admitting`);
+			return;
+		}
+
+		const existing = this.offers.get(workerId);
+		if (existing && existing.workerNonce === nonce && existing.expiresAt > Date.now()) return;
+		const orchestratorNonce = randomBytes(8).toString("hex");
+		const expiresAt = Date.now() + (this.options.pairingTtlMs ?? DEFAULT_PAIRING_TTL_MS);
+		const code = pairingCode({
+			room: this.options.room,
+			workerId,
+			orchestratorId: this.options.orchestratorId,
+			key,
+			workerNonce: nonce,
+			orchestratorNonce,
+		});
+		this.offers.set(workerId, { workerId, code, expiresAt, key, orchestratorId: this.options.orchestratorId, workerNonce: nonce });
+		this.publishPair("challenge", workerId, { nonce: orchestratorNonce, expiresAt });
+		this.options.log(
+			"warn",
+			`${workerId} wants to join: code ${formatPairingCode(code)} — compare it with the worker's screen, then /mqtt admit ${workerId} ${code}`,
+		);
+	}
+
+	private publishPair(step: PairMessage["step"], workerId: string, extra: Partial<PairMessage> = {}): void {
+		const message: PairMessage = {
+			v: 1,
+			kind: "pair",
+			step,
+			workerId,
+			orchestratorId: this.options.orchestratorId,
+			at: Date.now(),
+			...extra,
+		};
+		void this.link
+			.publish(this.topics.pair(workerId), message)
+			.catch((error: unknown) => this.options.log("error", `pairing message failed: ${(error as Error).message}`));
 	}
 
 	// --- internals -------------------------------------------------------

@@ -6,11 +6,14 @@
  * are untrusted input, so nothing is used without passing a guard).
  */
 
+import { createHash } from "node:crypto";
+
 export const PROTOCOL_VERSION = 1;
 export const CLIENT_VERSION = "0.1.0";
 
 export type Role = "orchestrator" | "worker";
-export type WorkerState = "idle" | "busy" | "offline";
+/** `pending`: joined, but no orchestrator has approved this session yet. */
+export type WorkerState = "idle" | "busy" | "offline" | "pending";
 export type TaskStatus = "done" | "error" | "timeout" | "cancelled";
 
 export interface RepoSpec {
@@ -109,6 +112,12 @@ export interface PresenceMessage {
 	startedAt?: number;
 	version: string;
 	updatedAt: number;
+	/** Long-term public key of this session (base64 DER, Ed25519). */
+	key?: string;
+	/** Per-join nonce, present while `pending`; makes an approval single-use. */
+	nonce?: string;
+	/** Ed25519 signature over the join statement, proving the key is ours. */
+	proof?: string;
 }
 
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
@@ -129,6 +138,8 @@ export function topicsFor(cluster: string) {
 		orchestratorPresence: (id: string) => `${base}/orchestrators/${id}/presence`,
 		control: (workerId: string) => `${base}/workers/${workerId}/ctl`,
 		ack: (workerId: string) => `${base}/workers/${workerId}/ack`,
+		/** Orchestrator → worker: pairing challenge, admission, revocation. */
+		pair: (workerId: string) => `${base}/workers/${workerId}/pair`,
 		result: (taskId: string) => `${base}/results/${taskId}`,
 		/** Room-wide announcements, currently only "kick". */
 		roomControl: `${base}/control`,
@@ -159,6 +170,66 @@ export function taskPromptFrame(task: TaskMessage): string {
 	}
 	lines.push("Your final assistant message is returned verbatim to the orchestrator. Keep it short and self-contained.");
 	return lines.join("\n");
+}
+
+/**
+ * The approval channel: an orchestrator answers a `pending` join.
+ *
+ * `challenge` carries a nonce so both ends can derive the same short code over the
+ * worker's key; `admit` and `revoke` carry the key fingerprint the decision is about,
+ * so a decision cannot be replayed onto a different key.
+ */
+export interface PairMessage {
+	v: number;
+	kind: "pair";
+	step: "challenge" | "admit" | "revoke";
+	workerId: string;
+	orchestratorId: string;
+	/** challenge: orchestrator nonce, and when this offer stops being usable. */
+	nonce?: string;
+	expiresAt?: number;
+	/** admit/revoke: the worker key this decision applies to. */
+	fingerprint?: string;
+	at: number;
+}
+
+/**
+ * The short code a human compares between the worker's screen and the orchestrator's.
+ *
+ * Derived from the worker key and both nonces: two different keys — a squatter's and
+ * the real worker's — cannot produce the same code, and a relay in the middle cannot
+ * make the two screens agree. Six digits, because the comparison is deliberate, not a
+ * secret to guess.
+ */
+export function pairingCode(input: {
+	room: string;
+	workerId: string;
+	orchestratorId: string;
+	key: string;
+	workerNonce: string;
+	orchestratorNonce: string;
+}): string {
+	const canonical = [
+		"pi-mqtt-pair",
+		input.room,
+		input.workerId,
+		input.orchestratorId,
+		input.key,
+		input.workerNonce,
+		input.orchestratorNonce,
+	].join("\n");
+	const digest = createHash("sha256").update(canonical).digest();
+	return String(digest.readUInt32BE(0) % 1_000_000).padStart(6, "0");
+}
+
+/** "481902" → "481 902", for reading aloud. */
+export function formatPairingCode(code: string): string {
+	return `${code.slice(0, 3)} ${code.slice(3)}`;
+}
+
+/** The statement a worker signs to prove it holds the key it advertises. */
+export function joinStatement(input: { room: string; workerId: string; nonce: string; key: string }): string {
+	return ["pi-mqtt-join", input.room, input.workerId, input.nonce, input.key].join("\n");
 }
 
 /** Newlines and control characters make MQTT log/topic inspection painful. */
@@ -211,6 +282,17 @@ export function isControlMessage(value: Json): value is Json & ControlMessage {
 	return isTaskMessage(value) || isCancelMessage(value) || isKickMessage(value);
 }
 
+export function isPairMessage(value: Json): value is Json & PairMessage {
+	const step = value.step;
+	return (
+		hasEnvelope(value, "pair") &&
+		isStr(value.workerId) &&
+		isStr(value.orchestratorId) &&
+		(step === "challenge" || step === "admit" || step === "revoke") &&
+		isNum(value.at)
+	);
+}
+
 export function isAckMessage(value: Json): value is Json & AckMessage {
 	return hasEnvelope(value, "ack") && isStr(value.taskId) && isStr(value.workerId);
 }
@@ -230,7 +312,7 @@ export function isPresenceMessage(value: Json): value is Json & PresenceMessage 
 		hasEnvelope(value, "presence") &&
 		isStr(value.workerId) &&
 		isStr(value.state) &&
-		["idle", "busy", "offline"].includes(value.state) &&
+		["idle", "busy", "offline", "pending"].includes(value.state) &&
 		isNum(value.updatedAt)
 	);
 }

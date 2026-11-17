@@ -154,6 +154,32 @@ Orchestrator tools (active only in an orchestrator session):
 | `list_tasks` | Task states: queued, sent, running, done, timeout, cancelled, lost |
 | `cancel_task` | Cooperative abort; the worker reports partial output |
 
+### A worker has to be let in
+
+A worker joins as `pending` and cannot be dispatched to until an orchestrator approves
+it. The approval is bound to the machine's key, not to its name, because ids are
+self-chosen:
+
+```
+worker joins pending → publishes its key + a join nonce
+orchestrator answers with a challenge nonce, and shows: pru_misc wants to join: code 481 902
+worker shows the same:                                 pi-mqtt: approval code 481 902
+you compare the two screens, then:                     /mqtt admit pru_misc 481902
+orchestrator stores key → worker goes idle and starts listening for tasks
+```
+
+An approval survives restarts, reloads and sleeps: a returning worker presents a
+signature over a fresh nonce, and if the key is on file it is admitted without a code.
+`/mqtt pending` lists codes that are waiting, `/mqtt trusted` shows the approved keys,
+and `/mqtt revoke <worker>` sends a worker back to `pending` with a fresh code, so it
+must be admitted again. Approvals live in `~/.pi/agent/pi-mqtt/trusted/<room>.json`,
+per orchestrator.
+
+Why a code rather than a click: the code is derived from the worker's key and both
+nonces, so a squatter that connects with the worker credential — wearing the right
+name — produces a *different* code, and the comparison is what catches it. Nothing
+secret is typed or stored; six digits is enough because the check is deliberate.
+
 `/mqtt kick [reason]` says goodbye to everyone: it publishes a room-wide message that every
 other session obeys by disconnecting itself, then clears the roster — including entries for
 sessions that died long ago. The sender stays. Since a room is one shared password, any
@@ -164,7 +190,8 @@ Typing `/mqtt ` offers the subcommands as completions (`/mqtt con` → `connect`
 a small provider on the editor's built-in one.
 
 Commands: `/mqtt status` (configuration and local state), `/mqtt workers` (the roster),
-`/mqtt tasks` (dispatched tasks), `/mqtt connect` / `/mqtt disconnect`, and `/mqtt kick`.
+`/mqtt tasks` (dispatched tasks), `/mqtt pending` / `/mqtt admit` / `/mqtt revoke` /
+`/mqtt trusted` (worker approval), `/mqtt connect` / `/mqtt disconnect`, and `/mqtt kick`.
 Bare `/mqtt` is `status` plus recent log lines.
 
 Editing configuration is a plain edit of `~/.pi/agent/pi-mqtt.json` (or the project file, or

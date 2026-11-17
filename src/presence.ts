@@ -24,10 +24,15 @@ export interface PresenceIdentity {
 	branch?: string;
 	headSha?: string;
 	model?: string;
+	/** This machine's long-term public key: what an orchestrator approves. */
+	key?: string;
 }
 
 export type PresencePatch = Partial<
-	Pick<PresenceMessage, "state" | "activeTaskId" | "startedAt" | "model" | "repo" | "branch" | "headSha">
+	Pick<
+		PresenceMessage,
+		"state" | "activeTaskId" | "startedAt" | "model" | "repo" | "branch" | "headSha" | "nonce" | "proof"
+	>
 >;
 
 export function buildPresence(
@@ -102,6 +107,18 @@ export class Presence {
 	/** Current advertised state, so callers can tell a busy worker from an idle one. */
 	get state(): WorkerState {
 		return this.current.state;
+	}
+
+	/**
+	 * Set fields without publishing, for building the state a session *joins* with.
+	 *
+	 * A worker's first announcement is `pending` plus the nonce and proof of its join; it
+	 * must not be published as `idle` first, or an orchestrator would briefly see a
+	 * dispatchable worker that has not been approved.
+	 */
+	seed(patch: PresencePatch): void {
+		if (this.stopped) return;
+		this.current = { ...this.current, ...patch, updatedAt: Date.now() };
 	}
 
 	start(): void {

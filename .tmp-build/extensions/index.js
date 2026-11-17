@@ -1,0 +1,1086 @@
+/**
+ * pi-mqtt: coordinate pi sessions over MQTT.
+ *
+ * One orchestrator (your live session) pins tasks to named workers. This file is
+ * the only entry point: it resolves the role, owns the connection lifecycle, wires
+ * the role modules together, and delivers results into the transcript.
+ *
+ * Nothing opens a socket at load time.
+ */
+import { randomBytes } from "node:crypto";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { hostname } from "node:os";
+import { dirname, join } from "node:path";
+import { Type } from "@earendil-works/pi-ai";
+import { envOverrideFor, loadConfig, } from "../src/config.js";
+import { readGitInfo } from "../src/git.js";
+import { MqttLink } from "../src/mqtt.js";
+import { loadOrCreateIdentity } from "../src/identity.js";
+import { Orchestrator } from "../src/orchestrator.js";
+import { Presence, buildPresence, probePresence } from "../src/presence.js";
+import { formatPairingCode, isKickMessage, isPairMessage, joinStatement, pairingCode, topicsFor, } from "../src/protocol.js";
+import { applySubcommandCompletion, subcommandSuggestions } from "../src/subcommands.js";
+import { TrustStore } from "../src/trusted.js";
+import { Worker } from "../src/worker.js";
+const FLAG_ROLE = "pi-mqtt-role";
+const FLAG_CONFIG = "pi-mqtt-config";
+const FLAG_FORCE = "pi-mqtt-force";
+const FLAG_START = "pi-mqtt-start";
+const TOOL_LIST_WORKERS = "list_workers";
+const TOOL_DISPATCH = "dispatch_task";
+const TOOL_RESULT = "get_result";
+const TOOL_CANCEL = "cancel_task";
+const TOOL_LIST_TASKS = "list_tasks";
+const ORCHESTRATOR_TOOLS = [TOOL_LIST_WORKERS, TOOL_DISPATCH, TOOL_RESULT, TOOL_CANCEL, TOOL_LIST_TASKS];
+const LOG_LIMIT = 100;
+const DIGEST_COALESCE_MS = 3_000;
+/** How long dispatch_task blocks waiting for the worker by default. */
+const DEFAULT_WAIT_MS = 120_000;
+let api;
+/** Worker id chosen for this session at join time (not the file's default). */
+let sessionWorkerId;
+/** Session id of the pi session this instance serves, for the join marker. */
+let currentSessionId;
+let session;
+let completionRegistered = false;
+let runtime;
+let currentCtx;
+let logs = [];
+function makeLog(ctx) {
+    return (level, message) => {
+        logs.push({ at: Date.now(), level, message });
+        if (logs.length > LOG_LIMIT)
+            logs = logs.slice(-LOG_LIMIT);
+        if (level !== "info")
+            ctx.ui.notify(`pi-mqtt: ${message}`, level === "warn" ? "warning" : "error");
+    };
+}
+function describeModel(ctx) {
+    const model = ctx.model;
+    if (!model)
+        return undefined;
+    return `${String(model.provider)}/${String(model.id)}`;
+}
+function clip(value, max) {
+    const flat = value.replace(/\s+/g, " ").trim();
+    return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+}
+function describeTask(record) {
+    const parts = [`task ${record.task.taskId} · ${record.task.to} · ${record.state}`];
+    const result = record.result;
+    if (!record.finishedAt) {
+        const since = record.startedAt ?? record.sentAt ?? record.task.createdAt;
+        parts.push(`still running (${Math.round((Date.now() - since) / 1000)}s); the result will arrive as a transcript entry`);
+        return parts.join("\n");
+    }
+    if (record.error)
+        parts.push(`error: ${record.error}`);
+    if (result?.error)
+        parts.push(`worker error: ${result.error}`);
+    if (result) {
+        parts.push(`duration: ${Math.round(result.durationMs / 1000)}s`);
+        if (result.text)
+            parts.push(`--- final message ---\n${result.text}`);
+        if (result.repo) {
+            parts.push(`repo: ${result.repo.branch ?? "-"} ${result.repo.baseSha?.slice(0, 8) ?? "?"}..${result.repo.headSha?.slice(0, 8) ?? "?"}`);
+            if (result.repo.diffstat)
+                parts.push(result.repo.diffstat);
+            if (result.repo.patchPath)
+                parts.push(`patch: ${result.repo.patchPath}`);
+        }
+        if (result.artifacts.length)
+            parts.push(`artifacts: ${result.artifacts.join(", ")}`);
+        if (result.sessionFile)
+            parts.push(`session: ${result.sessionFile}`);
+    }
+    return parts.join("\n");
+}
+function digestText(record) {
+    const lines = [`${record.task.to} · ${record.state} · ${clip(record.task.taskId, 40)}`];
+    const result = record.result;
+    if (result) {
+        const seconds = Math.round(result.durationMs / 1000);
+        lines[0] = `${record.task.to} · ${record.state} in ${seconds}s · ${clip(record.task.taskId, 40)}`;
+        if (result.text)
+            lines.push(clip(result.text, 700));
+        if (result.error)
+            lines.push(`error: ${result.error}`);
+        if (result.repo?.diffstat)
+            lines.push(clip(result.repo.diffstat, 300));
+        if (result.repo?.patchPath)
+            lines.push(`patch: ${result.repo.patchPath}`);
+        if (result.sessionFile)
+            lines.push(`session: ${result.sessionFile}`);
+    }
+    else if (record.error) {
+        lines.push(`error: ${record.error}`);
+    }
+    lines.push(`get_result("${record.task.taskId}") for full output`);
+    return lines.join("\n");
+}
+function flushDigests(pi) {
+    const current = runtime;
+    if (!current)
+        return;
+    if (current.timer)
+        clearTimeout(current.timer);
+    current.timer = undefined;
+    const pending = current.pending;
+    current.pending = [];
+    if (pending.length === 0)
+        return;
+    const body = pending.map(digestText).join("\n\n---\n\n");
+    pi.sendMessage({
+        customType: "pi-mqtt-task",
+        content: `pi-mqtt results\n\n${body}`,
+        display: true,
+        details: { tasks: pending.map((record) => ({ taskId: record.task.taskId, worker: record.task.to, state: record.state })) },
+    }, { triggerTurn: false });
+}
+function deliverResult(pi, record) {
+    const current = runtime;
+    if (!current)
+        return;
+    if (record.delivered || record.inlineWanted)
+        return;
+    if (record.task.notify === "wake") {
+        pi.sendUserMessage(`pi-mqtt result\n\n${digestText(record)}`, { deliverAs: "followUp" });
+        return;
+    }
+    current.pending.push(record);
+    if (current.timer)
+        return;
+    current.timer = setTimeout(() => flushDigests(pi), DIGEST_COALESCE_MS);
+    current.timer.unref?.();
+}
+function autoStartRequested(pi, config) {
+    if (pi.getFlag(FLAG_START) === true)
+        return true;
+    if (process.env.PI_MQTT_START === "1")
+        return true;
+    return config.connect === "auto";
+}
+/**
+ * Read the config and remember it. Connecting is a separate, explicit step.
+ *
+ * Reports whether the session is configured, and leaves the "run /mqtt connect"
+ * reminder to the caller: on a reload that is about to rejoin, telling the user to
+ * connect and then connecting is just noise.
+ */
+async function prepareSession(pi, ctx) {
+    const role = pi.getFlag(FLAG_ROLE) ?? process.env.PI_MQTT_ROLE;
+    const configPath = pi.getFlag(FLAG_CONFIG);
+    const loaded = loadConfig({
+        role,
+        ...(configPath ? { configPath } : {}),
+        cwd: ctx.cwd,
+    });
+    if (!loaded.ok) {
+        if (role)
+            ctx.ui.notify(`pi-mqtt inactive: ${loaded.reason}`, "warning");
+        return false;
+    }
+    const config = loaded.config;
+    session = { config, topics: topicsFor(config.mqtt.cluster), log: makeLog(ctx) };
+    if (autoStartRequested(pi, config)) {
+        await connectRuntime(pi, ctx, { auto: true });
+    }
+    return true;
+}
+/**
+ * Publish the join and turn a refusal into a diagnosis.
+ *
+ * The role is granted by the credential, not declared by the client: the broker answers
+ * 0x87 for a presence the credential has no right to, and continuing past that would be
+ * a session that only looks connected.
+ */
+async function announcePresence(presence, link, config, ctx) {
+    try {
+        await presence.announce();
+        return true;
+    }
+    catch (error) {
+        await link.close();
+        const reason = error.message;
+        const denied = error.code === 135 || /not authoriz/i.test(reason);
+        ctx.ui.notify(denied
+            ? `pi-mqtt: the broker refused this session as ${config.role} (credential "${config.mqtt.username ?? "?"}", room ${config.mqtt.cluster}). Roles are granted by the credential, not by config: use the credential the broker issued for this role, or ask for one. See deploy/README.md.`
+            : `pi-mqtt: could not join pi/v1/${config.mqtt.cluster}: ${reason}`, "error");
+        return false;
+    }
+}
+async function connectRuntime(pi, ctx, 
+/** `rejoin`: the session was in this room a moment ago and a reload took it out. */
+options = {}) {
+    const current = session;
+    if (!current) {
+        ctx.ui.notify("pi-mqtt is not configured in this session: no role or broker. See SETUP.md.", "warning");
+        return false;
+    }
+    if (runtime)
+        return true;
+    // Auto-connect must not invent an identity: an unnamed session that starts itself would
+    // claim whatever id the config implies, and nobody asked it to join. A manual
+    // /mqtt connect may use an explicit id, because that is a deliberate act.
+    if (options.auto && !sanitizeId(pi.getSessionName() ?? "")) {
+        ctx.ui.notify('pi-mqtt: connect is set to "auto" but this session has no name — start pi with --name <name>, or run /mqtt connect manually.', "warning");
+        return false;
+    }
+    const { topics, log } = current;
+    let config = current.config;
+    const chosen = resolveSessionId(pi, config);
+    if (!chosen) {
+        ctx.ui.notify("pi-mqtt: this session has no name. Name it first — /name <name>, or start pi with --name <name> — then /mqtt connect.", "error");
+        return false;
+    }
+    sessionWorkerId = chosen;
+    config = { ...config, worker: { ...config.worker, workerId: chosen } };
+    const git = readGitInfo(ctx.cwd);
+    const model = describeModel(ctx);
+    // One long-term key per machine: what an orchestrator approves, and what makes an
+    // approval survive a restart. Created on first use, mode 600, next to the log dir.
+    const machine = loadOrCreateIdentity(config.logDir);
+    const identity = {
+        workerId: config.worker.workerId,
+        host: hostname(),
+        cwd: ctx.cwd,
+        ...(git.repo ? { repo: git.repo } : {}),
+        ...(git.branch ? { branch: git.branch } : {}),
+        ...(git.headSha ? { headSha: git.headSha } : {}),
+        ...(model ? { model } : {}),
+        key: machine.key,
+    };
+    const isWorker = config.role === "worker";
+    // Deterministic client id: one live session per id, and a second one takes the
+    // connection over. That is the intended collision policy: no suffixes, no refusals.
+    const clientId = `pi-mqtt-${config.mqtt.cluster}-${config.worker.workerId}`;
+    const link = new MqttLink(config.mqtt, {
+        clientId,
+        ...(isWorker ? { will: { topic: topics.presence(config.worker.workerId), payload: buildPresence(identity, "offline") } } : {}),
+        log,
+    });
+    try {
+        await link.connect();
+    }
+    catch (error) {
+        await link.close();
+        const reason = error.message;
+        const hint = /certificate|self-signed|CA/i.test(reason)
+            ? " — set mqtt.caFile in pi-mqtt.json to the broker's CA bundle"
+            : "";
+        ctx.ui.notify(`pi-mqtt: cannot reach ${config.mqtt.url}: ${reason}${hint}`, "error");
+        return false;
+    }
+    // One worker id, one live session: two sessions under the same id both consume
+    // tasks and their results race, so take over explicitly or not at all. A rejoin
+    // skips the check: the live session under this id was this one, a second ago, and
+    // its retained entry may not even be gone yet. If a newcomer did claim the id in
+    // that window, the broker's takeover (and the notice for the loser) settles it.
+    if (isWorker && !options.rejoin) {
+        const existing = await probePresence(link, topics, config.worker.workerId, 1200);
+        const fresh = existing && existing.state !== "offline" && Date.now() - existing.updatedAt < config.worker.heartbeatMs * 3;
+        if (fresh && pi.getFlag(FLAG_FORCE) !== true) {
+            await link.close();
+            const age = Math.round((Date.now() - existing.updatedAt) / 1000);
+            ctx.ui.notify(`pi-mqtt: session "${config.worker.workerId}" is already live on ${existing.host} (${existing.cwd}, heartbeat ${age}s ago). Rename this pi session, or pass --pi-mqtt-force to take it over.`, "error");
+            return false;
+        }
+    }
+    const connected = { config, topics, link, pending: [] };
+    const presence = config.role === "orchestrator"
+        ? new Presence(link, topics.orchestratorPresence(config.worker.workerId), identity, config.worker.heartbeatMs, log, 86_400, "orchestrator")
+        : new Presence(link, topics.presence(config.worker.workerId), identity, config.worker.heartbeatMs, log);
+    connected.presence = presence;
+    if (config.role === "orchestrator") {
+        const orchestrator = new Orchestrator(link, topics, {
+            heartbeatMs: config.worker.heartbeatMs,
+            taskExpirySec: config.worker.taskExpirySec,
+            log,
+            onFinished: (record) => deliverResult(pi, record),
+            trust: new TrustStore(config.logDir, config.mqtt.cluster),
+            orchestratorId: config.worker.workerId,
+            room: config.mqtt.cluster,
+        });
+        // The role is granted by the credential, not declared by the client. Publishing
+        // the join is what proves it: the broker refuses a presence the credential has no
+        // right to, and continuing past that would be a session that only looks connected.
+        if (!(await announcePresence(presence, link, config, ctx)))
+            return false;
+        orchestrator.start();
+        connected.orchestrator = orchestrator;
+        presence.start();
+        pi.setActiveTools([...new Set([...pi.getActiveTools(), ...ORCHESTRATOR_TOOLS])]);
+        const waiting = orchestrator.pairingOffers();
+        if (waiting.length > 0) {
+            ctx.ui.notify(`pi-mqtt: ${waiting.length} worker(s) waiting for approval — /mqtt pending`, "warning");
+        }
+    }
+    else {
+        // A worker joins as `pending` and only becomes dispatchable when an orchestrator
+        // approves its key (see the pairing exchange below). Until then it does not even
+        // subscribe to its task topic.
+        const workerId = config.worker.workerId;
+        const worker = new Worker(link, topics, { pi, ctx: () => currentCtx, config, presence, log });
+        let approved = false;
+        /** The nonce of the current join attempt; a new one is minted on every revoke. */
+        let joinNonce;
+        const goPending = (why, publish = false) => {
+            const nonce = randomBytes(8).toString("hex");
+            joinNonce = nonce;
+            const proof = machine.sign(joinStatement({ room: config.mqtt.cluster, workerId, nonce, key: machine.key }));
+            const patch = { state: "pending", nonce, proof };
+            // The first join is seeded, because `announce()` publishes it; a revoke has to
+            // publish right away or the orchestrator keeps seeing the old, approved entry.
+            if (publish)
+                presence.update(patch);
+            else
+                presence.seed(patch);
+            ctx.ui.notify(`pi-mqtt: worker "${workerId}" ${why} and is waiting for an orchestrator to approve it. The approval code appears here once an orchestrator offers one.`, "info");
+        };
+        link.subscribe(topics.pair(workerId), (_topic, payload) => {
+            if (payload === undefined || !isPairMessage(payload))
+                return;
+            if (payload.workerId !== workerId)
+                return;
+            if (payload.step === "challenge") {
+                if (!joinNonce || typeof payload.nonce !== "string")
+                    return;
+                const code = pairingCode({
+                    room: config.mqtt.cluster,
+                    workerId,
+                    orchestratorId: payload.orchestratorId,
+                    key: machine.key,
+                    workerNonce: joinNonce,
+                    orchestratorNonce: payload.nonce,
+                });
+                ctx.ui.notify(`pi-mqtt: approval code ${formatPairingCode(code)} for ${payload.orchestratorId}. Compare it with the orchestrator's screen; it approves this session by typing /mqtt admit ${workerId} ${code}.`, "warning");
+                return;
+            }
+            if (payload.step === "admit") {
+                if (payload.fingerprint && payload.fingerprint !== machine.fingerprint) {
+                    log("warn", `ignoring approval for a different key (${payload.fingerprint})`);
+                    return;
+                }
+                if (approved)
+                    return;
+                approved = true;
+                presence.update({ state: "idle", nonce: undefined, proof: undefined });
+                worker.start();
+                ctx.ui.notify(`pi-mqtt: "${workerId}" approved by ${payload.orchestratorId}; listening for tasks`, "info");
+                return;
+            }
+            // revoke: back to pending, no tasks, new nonce so the old code cannot be reused.
+            approved = false;
+            worker.stop();
+            goPending(`was revoked by ${payload.orchestratorId}`, true);
+        });
+        goPending("joined");
+        if (!(await announcePresence(presence, link, config, ctx)))
+            return false;
+        presence.start();
+        connected.worker = worker;
+    }
+    // Reconnect: re-announce immediately instead of waiting for the next heartbeat.
+    // Both roles need this: an orchestrator whose presence vanished from the broker is
+    // invisible to the other members even though it is alive and dispatching.
+    link.onReconnect = () => connected.presence?.republish();
+    // Deterministic client id + broker takeover: the older session yields instead of
+    // reconnecting and evicting the newcomer in a loop. Silently stopping would leave a
+    // session that looks connected but hears nothing, so say it either way.
+    link.onTakenOver = () => {
+        void disconnectRuntime({ why: "another session took over this id" });
+        ctx.ui.notify(`pi-mqtt: session "${config.worker.workerId}" was taken over by another session; this one stopped. Rename this pi session if that was not intended.`, "error");
+    };
+    link.subscribe(topics.roomControl, (_topic, payload) => {
+        if (payload === undefined)
+            return;
+        if (!isKickMessage(payload))
+            return;
+        if (payload.from === config.worker.workerId)
+            return; // our own message
+        if (!runtime)
+            return;
+        const why = payload.reason ? `: ${payload.reason}` : "";
+        ctx.ui.notify(`pi-mqtt: ${payload.from} removed everyone from the room${why}. Disconnected.`, "warning");
+        if (runtime.config.role === "worker")
+            currentCtx?.abort();
+        runtime.presence?.forget();
+        void disconnectRuntime({ why: `removed from the room by ${payload.from}` });
+    });
+    runtime = connected;
+    rememberJoin(config, config.worker.workerId);
+    ctx.ui.notify(`pi-mqtt ${config.role} "${config.worker.workerId}" connected to ${topics.base}`, "info");
+    return true;
+}
+async function disconnectRuntime(options = {}) {
+    const current = runtime;
+    runtime = undefined;
+    if (!current)
+        return;
+    if (current.timer)
+        clearTimeout(current.timer);
+    current.orchestrator?.stop();
+    current.worker?.stop();
+    await current.presence?.stop();
+    await current.link.close();
+    if (current.config.role === "orchestrator" && api) {
+        const keep = api.getActiveTools().filter((name) => !ORCHESTRATOR_TOOLS.includes(name));
+        api.setActiveTools(keep);
+    }
+    if (!options.keepJoin)
+        forgetJoin(current.config.logDir, currentSessionId);
+    if (!options.quiet)
+        postOfflineNote(options.why ?? "disconnected");
+}
+/** Session end: disconnect (gracefully) and forget the config. */
+async function endSession(options = {}) {
+    completionRegistered = false;
+    await disconnectRuntime({ keepJoin: options.reloading === true, quiet: true });
+    session = undefined;
+    sessionWorkerId = undefined;
+}
+/** Local state plus who else is on the broker, as far as this role can see. */
+function statusText() {
+    if (!session)
+        return "pi-mqtt is not configured in this session (no role or broker). See SETUP.md.";
+    const { config, topics } = session;
+    const lines = [
+        `role:    ${config.role}`,
+        `name:    ${config.worker.name ?? `${config.worker.workerId} (hostname)`}`,
+        `session: ${api?.getSessionName() ?? "(unnamed)"}`,
+        `session id: ${runtime ? runtime.config.worker.workerId : "(not joined)"}`,
+        `broker:  ${config.mqtt.url} (MQTT ${config.mqtt.protocolVersion})`,
+        `room:    ${config.mqtt.cluster}`,
+        `topics:  ${topics.base}`,
+        `connect: ${config.connect}`,
+    ];
+    if (!runtime) {
+        lines.push("state:   disconnected — /mqtt connect to connect");
+        return lines.join("\n");
+    }
+    lines.push(`auth:    ${config.mqtt.token ? "room password" : `user ${config.mqtt.username ?? "?"}`}`);
+    const fromEnv = ["role", "connect", "url", "room", "roomPassword", "username", "password", "caFile"]
+        .map((field) => envOverrideFor(field))
+        .filter((name) => Boolean(name));
+    if (fromEnv.length > 0)
+        lines.push(`env:     ${fromEnv.join(", ")} (these win over the file)`);
+    const down = linkDownNotice(runtime.link);
+    if (down)
+        lines.push(`state:   DOWN — ${down}; /mqtt disconnect then /mqtt connect to rejoin`);
+    else
+        lines.push("state:   connected");
+    const reconnects = runtime.link.reconnects;
+    if (reconnects > 0) {
+        const last = runtime.link.lastClose;
+        const when = last ? new Date(last.at).toISOString().slice(11, 19) : "?";
+        const why = last
+            ? `${last.source}${last.code !== undefined ? ` ${last.code}` : ""}${last.reason ? ` ${last.reason}` : ""}`
+            : "unknown";
+        lines.push(`drops:   ${reconnects} (last ${when}: ${why})`);
+    }
+    const orchestrator = runtime.orchestrator;
+    if (orchestrator) {
+        const entries = orchestrator.entries();
+        const online = entries.filter((entry) => !entry.stale && entry.presence.state !== "offline");
+        const idle = online.filter((entry) => entry.presence.state === "idle");
+        const busy = online.filter((entry) => entry.presence.state === "busy");
+        const offline = entries.length - online.length;
+        lines.push(`workers: ${entries.length} known — ${online.length} online (${idle.length} idle, ${busy.length} busy), ${offline} off`);
+        const outstanding = orchestrator.outstanding();
+        if (outstanding.length > 0) {
+            const running = outstanding.filter((record) => record.state === "running");
+            const queued = outstanding.length - running.length;
+            lines.push(`tasks:   ${outstanding.length} outstanding (${running.length} running, ${queued} queued)`);
+        }
+        const offers = orchestrator.pairingOffers();
+        if (offers.length > 0) {
+            lines.push(`waiting: ${offers.map((offer) => `${offer.workerId} ${formatPairingCode(offer.code)}`).join(", ")} (compare with the worker's screen; /mqtt admit)`);
+        }
+        const trusted = orchestrator.trustedWorkers();
+        lines.push(`trusted: ${trusted.length === 0 ? "none" : trusted.map((worker) => `${worker.workerId} (${worker.fingerprint})`).join(", ")}`);
+        const others = orchestrator.orchestratorEntries();
+        lines.push(`orchestrators: ${others.length === 0 ? "none in the room" : others.map((entry) => entry.presence.workerId).join(", ")}`);
+        lines.push("roster:  /mqtt workers for the table");
+    }
+    else {
+        const presence = runtime.worker;
+        lines.push(presence ? `worker:  idle, listening for tasks` : "worker:  idle");
+        lines.push("peers:   not visible from a worker (the ACLs allow only its own topics)");
+    }
+    return lines.join("\n");
+}
+function sanitizeId(value) {
+    return value
+        .toLowerCase()
+        .replace(/[^a-z0-9_-]+/g, "-")
+        .replace(/^-+|-+$/g, "")
+        .slice(0, 48);
+}
+/**
+ * Pick the worker id for this session.
+ *
+ * An id set explicitly (flag, env, or `worker.workerId` in the file) is honoured as
+ * written. Otherwise the session name is offered as the default, and a live id is
+ * suffixed (-2, -3, …) rather than refused: several sessions may join from one host.
+ */
+/**
+ * The session's identity in the room: `<worker name>_<pi session name>`, always.
+ *
+ * Both halves are required: the name comes from the config file (else the computer name),
+ * and the session half is the pi session name, so naming the pi session is the price of
+ * joining. There is no override — an id is a function of who this machine is and which pi
+ * session asked, which is what makes the roster readable.
+ */
+function resolveSessionId(pi, config) {
+    if (sessionWorkerId)
+        return sessionWorkerId;
+    const named = sanitizeId(pi.getSessionName() ?? "");
+    if (!named)
+        return undefined;
+    const base = sanitizeId(config.worker.name ?? "") || config.worker.workerId;
+    return `${base}_${named}`;
+}
+/**
+ * `/mqtt <subcommand>` completion. The built-in provider knows commands, not their
+ * arguments, so this stacks a small wrapper that only reacts to a partial subcommand and
+ * otherwise defers to it.
+ */
+function withSubcommandCompletion(current) {
+    return {
+        async getSuggestions(lines, cursorLine, cursorCol, options) {
+            const text = (lines[cursorLine] ?? "").slice(0, cursorCol);
+            const suggestion = subcommandSuggestions(text);
+            if (suggestion) {
+                return { items: suggestion.items, prefix: suggestion.prefix };
+            }
+            return current.getSuggestions(lines, cursorLine, cursorCol, options);
+        },
+        applyCompletion(lines, cursorLine, cursorCol, item, prefix) {
+            // Only our own subcommand items carry "/mqtt <name>"; the built-in provider's
+            // command item for "/mqtt" has no space, and rewriting it would drop the slash
+            // and turn the command into a prompt.
+            if (!item.value.startsWith("/mqtt ")) {
+                return current.applyCompletion(lines, cursorLine, cursorCol, item, prefix);
+            }
+            const updated = applySubcommandCompletion(lines[cursorLine] ?? "", cursorCol, item.value, prefix);
+            const next = [...lines];
+            next[cursorLine] = updated.line;
+            return { lines: next, cursorLine, cursorCol: updated.cursorCol };
+        },
+        shouldTriggerFileCompletion(lines, cursorLine, cursorCol) {
+            return current.shouldTriggerFileCompletion?.(lines, cursorLine, cursorCol) ?? true;
+        },
+    };
+}
+function joinMarkerPath(logDir, sessionId) {
+    return join(logDir, "joined", `${sanitizeId(sessionId) || "session"}.json`);
+}
+function rememberJoin(config, workerId) {
+    if (!currentSessionId)
+        return;
+    try {
+        const path = joinMarkerPath(config.logDir, currentSessionId);
+        mkdirSync(dirname(path), { recursive: true });
+        const marker = {
+            pid: process.pid,
+            sessionId: currentSessionId,
+            role: config.role,
+            workerId,
+            cluster: config.mqtt.cluster,
+            url: config.mqtt.url,
+            joinedAt: Date.now(),
+        };
+        writeFileSync(path, JSON.stringify(marker));
+    }
+    catch {
+        // A marker that cannot be written only costs a manual /mqtt connect after a reload.
+    }
+}
+/** The join this session had a moment ago, if the room is still the same one. */
+function readJoin(config, sessionId) {
+    if (!sessionId)
+        return undefined;
+    try {
+        const marker = JSON.parse(readFileSync(joinMarkerPath(config.logDir, sessionId), "utf8"));
+        if (marker.pid !== process.pid || marker.sessionId !== sessionId)
+            return undefined;
+        if (marker.role !== config.role)
+            return undefined;
+        if (marker.cluster !== config.mqtt.cluster || marker.url !== config.mqtt.url)
+            return undefined;
+        return marker;
+    }
+    catch {
+        return undefined;
+    }
+}
+function forgetJoin(logDir, sessionId) {
+    if (!sessionId)
+        return;
+    try {
+        rmSync(joinMarkerPath(logDir, sessionId), { force: true });
+    }
+    catch {
+        // Nothing to forget.
+    }
+}
+/**
+ * Put the truth in the transcript: the tools just went away, and the model cannot
+ * see a tool that is no longer active. Without this line it reads its own older
+ * turns as current, and reports a worker as offline from a roster that stopped
+ * updating before the disconnect.
+ */
+function postOfflineNote(why) {
+    api?.sendMessage({
+        customType: "pi-mqtt-notice",
+        content: `pi-mqtt left the room: ${why}. list_workers, dispatch_task and the other pi-mqtt tools are inactive until /mqtt connect. ` +
+            "Anything pi-mqtt-related above this line describes the room as it was before this point, not as it is now.",
+        display: true,
+        details: { why },
+    }, { triggerTurn: false });
+}
+/**
+ * Why the roster cannot be trusted: this session's own link to the broker is down.
+ *
+ * Without this, a dead link is indistinguishable from a stalled worker — the retained
+ * presence the session last heard about keeps aging, and every reader concludes the
+ * worker went quiet instead of the socket.
+ */
+function linkDownNotice(link) {
+    if (link.online)
+        return undefined;
+    const last = link.lastClose;
+    const when = last ? new Date(last.at).toISOString().slice(11, 19) : "?";
+    const why = last
+        ? `${last.source}${last.code !== undefined ? ` ${last.code}` : ""}${last.reason ? ` ${last.reason}` : ""}`
+        : "unknown";
+    return `no link to the broker since ${when} (${why})`;
+}
+/** Why a tool or command cannot do its job right now. */
+function inactiveReason() {
+    if (!session)
+        return "pi-mqtt is not configured in this session (no role or broker). See SETUP.md.";
+    if (!runtime)
+        return "pi-mqtt is not connected — run /mqtt connect (or launch with --pi-mqtt-start).";
+    return "pi-mqtt is not active as an orchestrator in this session.";
+}
+export default function (pi) {
+    pi.registerFlag(FLAG_ROLE, { description: "pi-mqtt role: orchestrator | worker", type: "string" });
+    pi.registerFlag(FLAG_CONFIG, { description: "path to pi-mqtt.json", type: "string" });
+    pi.registerFlag(FLAG_FORCE, {
+        description: "start even if another live session is already using this worker id",
+        type: "boolean",
+        default: false,
+    });
+    pi.registerFlag(FLAG_START, {
+        description: "connect to the broker at session start instead of waiting for /mqtt connect",
+        type: "boolean",
+        default: false,
+    });
+    // Registered always, activated only for an orchestrator. That keeps installed
+    // packages invisible in unrelated sessions without re-registering on reload.
+    pi.registerTool({
+        name: TOOL_LIST_WORKERS,
+        label: "List workers",
+        description: "List pi-mqtt workers advertised on the broker: state (idle/busy/offline), repo and branch, model, working directory, and heartbeat age.",
+        parameters: Type.Object({}),
+        defaultActive: false,
+        async execute() {
+            const current = runtime;
+            if (!current?.orchestrator) {
+                return { content: [{ type: "text", text: inactiveReason() }], details: undefined };
+            }
+            const notice = linkDownNotice(current.link);
+            const offers = current.orchestrator.pairingOffers();
+            const waiting = offers.length === 0
+                ? ""
+                : `\n\nwaiting for approval (compare each code with the worker's screen, then /mqtt admit <worker> <code>):\n${offers
+                    .map((offer) => `${offer.workerId} · code ${formatPairingCode(offer.code)}`)
+                    .join("\n")}`;
+            const table = `${current.orchestrator.combinedTable()}${waiting}`;
+            return {
+                content: [
+                    {
+                        type: "text",
+                        text: notice
+                            ? `pi-mqtt has ${notice} — this roster is frozen and every dispatch fails. /mqtt disconnect then /mqtt connect to rejoin.\n\n${table}`
+                            : table,
+                    },
+                ],
+                details: {
+                    cluster: current.config.mqtt.cluster,
+                    workers: current.orchestrator.entries().map((entry) => ({
+                        workerId: entry.presence.workerId,
+                        state: entry.stale ? "stale" : entry.presence.state,
+                        repo: entry.presence.repo,
+                        branch: entry.presence.branch,
+                        model: entry.presence.model,
+                        cwd: entry.presence.cwd,
+                        activeTaskId: entry.presence.activeTaskId,
+                        ageMs: entry.ageMs,
+                    })),
+                },
+            };
+        },
+    });
+    pi.registerTool({
+        name: TOOL_DISPATCH,
+        label: "Dispatch task",
+        description: "Send a task to one named pi-mqtt worker and return immediately. The worker runs it in its own session; the result arrives later as a transcript entry. Use this instead of publishing MQTT messages yourself.",
+        promptSnippet: "dispatch_task — hand work to a named pi-mqtt worker",
+        promptGuidelines: [
+            "Hand work to other agents with `dispatch_task`; never publish pi-mqtt protocol messages with bash.",
+            "Check `list_workers` before dispatching: dispatch fails fast if the target is unknown, offline, or busy.",
+            "`dispatch_task` waits for the result by default and returns it, so do not poll with `get_result` or `sleep`; pass `wait: false` only when fanning out.",
+        ],
+        parameters: Type.Object({
+            to: Type.String({ description: "Exact worker id from list_workers, e.g. lap-b" }),
+            prompt: Type.String({ description: "The task, in prose. State what 'done' looks like." }),
+            notify: Type.Optional(Type.Union([Type.Literal("silent"), Type.Literal("wake")], {
+                description: "silent (default) drops a digest; wake starts a turn when the result arrives",
+            })),
+            ifBusy: Type.Optional(Type.Union([Type.Literal("fail"), Type.Literal("wait")], {
+                description: "fail (default) returns an error; wait holds the task in this session's outbox until the worker is idle",
+            })),
+            wait: Type.Optional(Type.Boolean({
+                description: "Wait for the result and return it in this tool call (default true). Pass false to fan out and let results arrive as transcript entries.",
+            })),
+            waitTimeoutMs: Type.Optional(Type.Number({ description: `How long to wait for the result before returning. Default ${DEFAULT_WAIT_MS}ms.` })),
+            timeoutMs: Type.Optional(Type.Number({ description: "Abort the worker's run after this long. Default 10 minutes." })),
+            maxCostUsd: Type.Optional(Type.Number({ description: "Abort the worker's run when its spend exceeds this" })),
+            model: Type.Optional(Type.String({ description: "Requested model; honored only if the worker allows overrides" })),
+            repo: Type.Optional(Type.Object({
+                baseRef: Type.Optional(Type.String({ description: "Branch or ref to start from" })),
+                baseSha: Type.Optional(Type.String({ description: "Exact commit to start from; preferred over baseRef" })),
+                branch: Type.Optional(Type.String({ description: "Branch to create; defaults to worker/<id>" })),
+            })),
+        }),
+        defaultActive: false,
+        async execute(_toolCallId, params, signal) {
+            const current = runtime;
+            if (!current?.orchestrator) {
+                return {
+                    content: [{ type: "text", text: inactiveReason() }],
+                    details: undefined,
+                    isError: true,
+                };
+            }
+            const send = () => current.orchestrator.dispatch({
+                to: params.to,
+                prompt: params.prompt,
+                ...(params.notify ? { notify: params.notify } : {}),
+                ...(params.ifBusy ? { ifBusy: params.ifBusy } : {}),
+                ...(params.timeoutMs !== undefined ? { timeoutMs: params.timeoutMs } : {}),
+                ...(params.maxCostUsd !== undefined ? { maxCostUsd: params.maxCostUsd } : {}),
+                ...(params.model ? { model: params.model } : {}),
+                ...(params.repo ? { repo: params.repo } : {}),
+            });
+            let outcome = send();
+            // A worker that just connected may not have its retained presence delivered yet;
+            // give that race a moment before reporting it as unknown.
+            if (!outcome.ok && outcome.error.startsWith("unknown worker")) {
+                await new Promise((resolve) => setTimeout(resolve, 1200));
+                outcome = send();
+            }
+            if (!outcome.ok) {
+                return {
+                    content: [{ type: "text", text: `dispatch failed: ${outcome.error}` }],
+                    details: { error: outcome.error },
+                    isError: true,
+                };
+            }
+            const queuedNote = outcome.state === "queued" ? " (queued: worker is busy; it fires when idle)" : "";
+            if (params.wait === false) {
+                return {
+                    content: [{ type: "text", text: `dispatched ${outcome.taskId} to ${params.to}${queuedNote}; not waiting` }],
+                    details: { taskId: outcome.taskId, state: outcome.state, worker: params.to },
+                };
+            }
+            const waitMs = params.waitTimeoutMs ?? DEFAULT_WAIT_MS;
+            // Declare the intent first: the result may land while we are waiting, and
+            // onFinished runs before this continuation resumes.
+            const tracked = current.orchestrator.get(outcome.taskId);
+            if (tracked)
+                tracked.inlineWanted = true;
+            const finished = await current.orchestrator.waitFor(outcome.taskId, waitMs, signal);
+            if (!finished) {
+                if (tracked)
+                    tracked.inlineWanted = false;
+                // Race: it finished while we were giving up, so deliver it normally.
+                if (tracked?.finishedAt)
+                    deliverResult(pi, tracked);
+                // Still running, or the caller's tool call was aborted: either way the
+                // worker keeps going and the digest path delivers the result.
+                return {
+                    content: [
+                        {
+                            type: "text",
+                            text: `dispatched ${outcome.taskId} to ${params.to}${queuedNote}; still running after ${Math.round(waitMs / 1000)}s. The result will arrive as a transcript entry.`,
+                        },
+                    ],
+                    details: { taskId: outcome.taskId, state: outcome.state, worker: params.to },
+                };
+            }
+            finished.delivered = true;
+            return {
+                content: [{ type: "text", text: describeTask(finished) }],
+                details: { taskId: outcome.taskId, state: finished.state, worker: params.to },
+            };
+        },
+    });
+    pi.registerTool({
+        name: TOOL_RESULT,
+        label: "Get task result",
+        description: "Fetch the full result of a dispatched pi-mqtt task: final text, status, diffstat, patch path, session file.",
+        parameters: Type.Object({ taskId: Type.String({ description: "Task id returned by dispatch_task" }) }),
+        defaultActive: false,
+        async execute(_toolCallId, params) {
+            const record = runtime?.orchestrator?.get(params.taskId);
+            if (!record) {
+                return { content: [{ type: "text", text: `unknown task ${params.taskId}` }], details: undefined, isError: true };
+            }
+            record.delivered = true;
+            return {
+                content: [{ type: "text", text: describeTask(record) }],
+                details: { status: record.state, result: record.result },
+            };
+        },
+    });
+    pi.registerTool({
+        name: TOOL_LIST_TASKS,
+        label: "List tasks",
+        description: "List pi-mqtt tasks dispatched in this session with their state (queued, sent, running, done, timeout, cancelled, lost). Use it before re-dispatching a lost or timed-out task.",
+        parameters: Type.Object({}),
+        defaultActive: false,
+        async execute() {
+            const current = runtime;
+            if (!current?.orchestrator) {
+                return { content: [{ type: "text", text: inactiveReason() }], details: undefined };
+            }
+            return {
+                content: [{ type: "text", text: current.orchestrator.taskTable() }],
+                details: {
+                    tasks: current.orchestrator.list().map((record) => ({
+                        taskId: record.task.taskId,
+                        worker: record.task.to,
+                        state: record.state,
+                        attempts: record.attempts,
+                        error: record.error ?? record.result?.error,
+                    })),
+                },
+            };
+        },
+    });
+    pi.registerTool({
+        name: TOOL_CANCEL,
+        label: "Cancel task",
+        description: "Cancel a dispatched pi-mqtt task. Cooperative: the worker aborts its current run and reports the partial result.",
+        parameters: Type.Object({ taskId: Type.String({ description: "Task id to cancel" }) }),
+        defaultActive: false,
+        async execute(_toolCallId, params) {
+            const outcome = runtime?.orchestrator?.cancel(params.taskId) ?? { ok: false, error: "pi-mqtt is not active as an orchestrator" };
+            return {
+                content: [{ type: "text", text: outcome.ok ? `cancelled ${params.taskId}` : `cancel failed: ${outcome.error}` }],
+                details: outcome,
+                ...(outcome.ok ? {} : { isError: true }),
+            };
+        },
+    });
+    pi.registerCommand("mqtt", {
+        description: "pi-mqtt: /mqtt status, workers, tasks, connect, disconnect, kick",
+        handler: async (args, ctx) => {
+            const raw = args.trim();
+            const arg = raw.toLowerCase();
+            if (arg === "status") {
+                ctx.ui.notify(statusText(), "info");
+                return;
+            }
+            if (arg === "connect") {
+                await connectRuntime(pi, ctx);
+                return;
+            }
+            if (arg.startsWith("pending")) {
+                if (!runtime?.orchestrator) {
+                    ctx.ui.notify("pi-mqtt: only an orchestrator approves workers.", "info");
+                    return;
+                }
+                const offers = runtime.orchestrator.pairingOffers();
+                if (offers.length === 0) {
+                    ctx.ui.notify("pi-mqtt: no worker is waiting for approval.", "info");
+                    return;
+                }
+                const lines = offers.map((offer) => {
+                    const minutes = Math.max(0, Math.round((offer.expiresAt - Date.now()) / 60_000));
+                    return `${offer.workerId} · code ${formatPairingCode(offer.code)} · expires in ${minutes}m`;
+                });
+                ctx.ui.notify([
+                    "workers waiting for approval (compare each code with the worker's screen):",
+                    ...lines,
+                    "",
+                    `/mqtt admit <worker> <code>   e.g. /mqtt admit ${offers[0]?.workerId} ${offers[0]?.code}`,
+                ].join("\n"), "warning");
+                return;
+            }
+            if (arg.startsWith("admit")) {
+                if (!runtime?.orchestrator) {
+                    ctx.ui.notify("pi-mqtt: only an orchestrator approves workers.", "info");
+                    return;
+                }
+                const [, workerId, code] = raw.split(/\s+/);
+                if (!workerId || !code) {
+                    ctx.ui.notify("usage: /mqtt admit <worker> <code>   (codes: /mqtt pending)", "warning");
+                    return;
+                }
+                const outcome = runtime.orchestrator.admit(workerId, code);
+                ctx.ui.notify(outcome.ok ? `pi-mqtt: approved "${workerId}".` : `pi-mqtt: ${outcome.error}`, outcome.ok ? "info" : "warning");
+                return;
+            }
+            if (arg.startsWith("revoke")) {
+                if (!runtime?.orchestrator) {
+                    ctx.ui.notify("pi-mqtt: only an orchestrator revokes workers.", "info");
+                    return;
+                }
+                const workerId = raw.split(/\s+/)[1];
+                if (!workerId) {
+                    ctx.ui.notify("usage: /mqtt revoke <worker>", "warning");
+                    return;
+                }
+                const outcome = runtime.orchestrator.revoke(workerId);
+                ctx.ui.notify(outcome.ok ? `pi-mqtt: revoked "${workerId}".` : `pi-mqtt: ${outcome.error}`, outcome.ok ? "info" : "warning");
+                return;
+            }
+            if (arg.startsWith("trusted")) {
+                if (!runtime?.orchestrator) {
+                    ctx.ui.notify("pi-mqtt: only an orchestrator has an approval list.", "info");
+                    return;
+                }
+                const trusted = runtime.orchestrator.trustedWorkers();
+                ctx.ui.notify(trusted.length === 0
+                    ? "pi-mqtt: no workers approved yet — a joining worker shows a code, then /mqtt admit <worker> <code>."
+                    : ["approved workers:", ...trusted.map((w) => `${w.workerId} · ${w.fingerprint} · ${new Date(w.admittedAt).toISOString().slice(0, 16).replace("T", " ")}Z · by ${w.admittedBy}`)].join("\n"), "info");
+                return;
+            }
+            if (arg.startsWith("kick")) {
+                if (!runtime) {
+                    ctx.ui.notify("pi-mqtt is not connected.", "info");
+                    return;
+                }
+                const reason = args.trim().slice(4).trim() || undefined;
+                const from = runtime.config.worker.workerId;
+                // Everyone the registry knows about, live or long gone: the kick evicts the
+                // live ones and clears the retained entries of the rest.
+                const others = new Set([
+                    ...(runtime.orchestrator?.entries() ?? []).map((entry) => entry.presence.workerId),
+                    ...(runtime.orchestrator?.orchestratorEntries(true) ?? []).map((entry) => entry.presence.workerId),
+                ].filter((id) => id !== from));
+                const topics = runtime.topics;
+                const link = runtime.link;
+                const purge = [...others].flatMap((id) => [topics.presence(id), topics.orchestratorPresence(id)]);
+                await link.publish(topics.roomControl, { v: 1, kind: "kick", from, at: Date.now(), ...(reason ? { reason } : {}) }, {});
+                ctx.ui.notify(`pi-mqtt: said goodbye to everyone${reason ? ` (${reason})` : ""}${purge.length > 0 ? `; clearing ${purge.length} roster entries…` : ""}`, "info");
+                if (purge.length === 0)
+                    return;
+                // Give the others a moment to disconnect (and delete their own presence),
+                // then clear whatever is left — including entries that were already stale.
+                void (async () => {
+                    await new Promise((resolve) => setTimeout(resolve, 1500));
+                    const { ok, failed } = await link.deleteRetained(purge);
+                    ctx.ui.notify(`pi-mqtt: roster cleared — ${ok} entr${ok === 1 ? "y" : "ies"} removed${failed > 0 ? `, ${failed} failed` : ""}.`, failed > 0 ? "warning" : "info");
+                })();
+                return;
+            }
+            if (arg === "disconnect") {
+                if (!runtime) {
+                    ctx.ui.notify("pi-mqtt is not connected.", "info");
+                    return;
+                }
+                await disconnectRuntime({ why: "disconnected by /mqtt disconnect" });
+                ctx.ui.notify("pi-mqtt disconnected.", "info");
+                return;
+            }
+            if (arg.startsWith("workers")) {
+                if (!runtime) {
+                    ctx.ui.notify("pi-mqtt is not connected.", "info");
+                    return;
+                }
+                if (!runtime.orchestrator) {
+                    ctx.ui.notify("pi-mqtt: the roster is only visible from an orchestrator.", "info");
+                    return;
+                }
+                const notice = linkDownNotice(runtime.link);
+                ctx.ui.notify(notice
+                    ? `pi-mqtt has ${notice} — the roster below is frozen.\n\n${runtime.orchestrator.combinedTable()}`
+                    : runtime.orchestrator.combinedTable(), notice ? "warning" : "info");
+                return;
+            }
+            if (arg.startsWith("tasks")) {
+                if (!runtime?.orchestrator) {
+                    ctx.ui.notify("pi-mqtt: tasks are only visible from an orchestrator.", "info");
+                    return;
+                }
+                ctx.ui.notify(runtime.orchestrator.taskTable(), "info");
+                return;
+            }
+            if (arg) {
+                ctx.ui.notify("usage: /mqtt [status|workers|tasks|pending|admit|revoke|trusted|connect|disconnect|kick]", "warning");
+                return;
+            }
+            const lines = logs
+                .slice(-12)
+                .map((line) => `${new Date(line.at).toISOString().slice(11, 19)} ${line.level.padEnd(5)} ${line.message}`);
+            ctx.ui.notify([statusText(), "", ...lines].join("\n"), "info");
+        },
+    });
+    pi.on("session_start", async (event, ctx) => {
+        currentCtx = ctx;
+        if (!completionRegistered) {
+            completionRegistered = true;
+            ctx.ui.addAutocompleteProvider(withSubcommandCompletion);
+        }
+        api = pi;
+        currentSessionId = ctx.sessionManager.getSessionId();
+        await endSession({ reloading: event.reason === "reload" });
+        let configured = false;
+        try {
+            configured = await prepareSession(pi, ctx);
+        }
+        catch (error) {
+            ctx.ui.notify(`pi-mqtt: ${error.message}`, "error");
+        }
+        // A reload keeps the process and the session, so re-establish the room the previous
+        // instance left. Any other reason is a different life for this id: a leftover marker
+        // (a crashed run) must not make it join on its own.
+        const previous = session && event.reason === "reload" ? readJoin(session.config, currentSessionId) : undefined;
+        if (previous) {
+            const joined = await connectRuntime(pi, ctx, { rejoin: true });
+            if (!joined)
+                postOfflineNote(`the reload could not re-establish the room`);
+        }
+        else if (session && !runtime) {
+            forgetJoin(session.config.logDir, currentSessionId);
+        }
+        if (configured && !runtime && session) {
+            ctx.ui.notify(`pi-mqtt configured as ${session.config.role} "${session.config.worker.workerId}" — run /mqtt connect to connect`, "info");
+        }
+    });
+    pi.on("session_shutdown", async (event) => {
+        // On reload the marker stays, because the next instance rejoins from it.
+        await endSession({ reloading: event.reason === "reload" });
+        currentCtx = undefined;
+    });
+    pi.on("agent_start", async () => {
+        if (runtime?.config.role === "orchestrator")
+            runtime.presence?.update({ state: "busy" });
+    });
+    pi.on("agent_settled", async () => {
+        if (runtime?.config.role === "orchestrator")
+            runtime.presence?.update({ state: "idle" });
+    });
+    pi.on("model_select", async (_event, ctx) => {
+        currentCtx = ctx;
+        const model = describeModel(ctx);
+        if (model)
+            runtime?.presence?.update({ model });
+    });
+    logs = [];
+}

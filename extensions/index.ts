@@ -8,6 +8,7 @@
  * Nothing opens a socket at load time.
  */
 
+import { randomBytes } from "node:crypto";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -25,10 +26,20 @@ import {
 } from "../src/config.ts";
 import { readGitInfo } from "../src/git.ts";
 import { MqttLink, type LogFn } from "../src/mqtt.ts";
+import { loadOrCreateIdentity } from "../src/identity.ts";
 import { Orchestrator, type TaskRecord } from "../src/orchestrator.ts";
 import { Presence, buildPresence, probePresence, type PresenceIdentity } from "../src/presence.ts";
-import { isKickMessage, topicsFor, type Topics } from "../src/protocol.ts";
+import {
+	formatPairingCode,
+	isKickMessage,
+	isPairMessage,
+	joinStatement,
+	pairingCode,
+	topicsFor,
+	type Topics,
+} from "../src/protocol.ts";
 import { applySubcommandCompletion, subcommandSuggestions } from "../src/subcommands.ts";
+import { TrustStore } from "../src/trusted.ts";
 import { Worker } from "../src/worker.ts";
 
 const FLAG_ROLE = "pi-mqtt-role";
@@ -244,6 +255,36 @@ async function prepareSession(pi: ExtensionAPI, ctx: ExtensionContext): Promise<
 	return true;
 }
 
+/**
+ * Publish the join and turn a refusal into a diagnosis.
+ *
+ * The role is granted by the credential, not declared by the client: the broker answers
+ * 0x87 for a presence the credential has no right to, and continuing past that would be
+ * a session that only looks connected.
+ */
+async function announcePresence(
+	presence: Presence,
+	link: MqttLink,
+	config: AppConfig,
+	ctx: ExtensionContext,
+): Promise<boolean> {
+	try {
+		await presence.announce();
+		return true;
+	} catch (error) {
+		await link.close();
+		const reason = (error as Error).message;
+		const denied = (error as { code?: unknown }).code === 135 || /not authoriz/i.test(reason);
+		ctx.ui.notify(
+			denied
+				? `pi-mqtt: the broker refused this session as ${config.role} (credential "${config.mqtt.username ?? "?"}", room ${config.mqtt.cluster}). Roles are granted by the credential, not by config: use the credential the broker issued for this role, or ask for one. See deploy/README.md.`
+				: `pi-mqtt: could not join pi/v1/${config.mqtt.cluster}: ${reason}`,
+			"error",
+		);
+		return false;
+	}
+}
+
 async function connectRuntime(
 	pi: ExtensionAPI,
 	ctx: ExtensionContext,
@@ -282,6 +323,9 @@ async function connectRuntime(
 	config = { ...config, worker: { ...config.worker, workerId: chosen } };
 	const git = readGitInfo(ctx.cwd);
 	const model = describeModel(ctx);
+	// One long-term key per machine: what an orchestrator approves, and what makes an
+	// approval survive a restart. Created on first use, mode 600, next to the log dir.
+	const machine = loadOrCreateIdentity(config.logDir);
 	const identity: PresenceIdentity = {
 		workerId: config.worker.workerId,
 		host: hostname(),
@@ -290,6 +334,7 @@ async function connectRuntime(
 		...(git.branch ? { branch: git.branch } : {}),
 		...(git.headSha ? { headSha: git.headSha } : {}),
 		...(model ? { model } : {}),
+		key: machine.key,
 	};
 
 	const isWorker = config.role === "worker";
@@ -348,39 +393,93 @@ async function connectRuntime(
 			: new Presence(link, topics.presence(config.worker.workerId), identity, config.worker.heartbeatMs, log);
 	connected.presence = presence;
 
-	// The role is granted by the credential, not declared by the client. Publishing the
-	// join is what proves it: the broker refuses a presence the credential has no right
-	// to, and continuing past that would be a session that only looks connected.
-	try {
-		await presence.announce();
-	} catch (error) {
-		await link.close();
-		const reason = (error as Error).message;
-		const denied = (error as { code?: unknown }).code === 135 || /not authoriz/i.test(reason);
-		ctx.ui.notify(
-			denied
-				? `pi-mqtt: the broker refused this session as ${config.role} (credential "${config.mqtt.username ?? "?"}", room ${config.mqtt.cluster}). Roles are granted by the credential, not by config: use the credential the broker issued for this role, or ask for one. See deploy/README.md.`
-				: `pi-mqtt: could not join ${topics.base}: ${reason}`,
-			"error",
-		);
-		return false;
-	}
-
 	if (config.role === "orchestrator") {
 		const orchestrator = new Orchestrator(link, topics, {
 			heartbeatMs: config.worker.heartbeatMs,
 			taskExpirySec: config.worker.taskExpirySec,
 			log,
 			onFinished: (record) => deliverResult(pi, record),
+			trust: new TrustStore(config.logDir, config.mqtt.cluster),
+			orchestratorId: config.worker.workerId,
+			room: config.mqtt.cluster,
 		});
+		// The role is granted by the credential, not declared by the client. Publishing
+		// the join is what proves it: the broker refuses a presence the credential has no
+		// right to, and continuing past that would be a session that only looks connected.
+		if (!(await announcePresence(presence, link, config, ctx))) return false;
 		orchestrator.start();
 		connected.orchestrator = orchestrator;
 		presence.start();
 		pi.setActiveTools([...new Set([...pi.getActiveTools(), ...ORCHESTRATOR_TOOLS])]);
+		const waiting = orchestrator.pairingOffers();
+		if (waiting.length > 0) {
+			ctx.ui.notify(`pi-mqtt: ${waiting.length} worker(s) waiting for approval — /mqtt pending`, "warning");
+		}
 	} else {
-		presence.start();
+		// A worker joins as `pending` and only becomes dispatchable when an orchestrator
+		// approves its key (see the pairing exchange below). Until then it does not even
+		// subscribe to its task topic.
+		const workerId = config.worker.workerId;
 		const worker = new Worker(link, topics, { pi, ctx: () => currentCtx, config, presence, log });
-		worker.start();
+		let approved = false;
+		/** The nonce of the current join attempt; a new one is minted on every revoke. */
+		let joinNonce: string | undefined;
+
+		const goPending = (why: string, publish = false): void => {
+			const nonce = randomBytes(8).toString("hex");
+			joinNonce = nonce;
+			const proof = machine.sign(joinStatement({ room: config.mqtt.cluster, workerId, nonce, key: machine.key }));
+			const patch = { state: "pending" as const, nonce, proof };
+			// The first join is seeded, because `announce()` publishes it; a revoke has to
+			// publish right away or the orchestrator keeps seeing the old, approved entry.
+			if (publish) presence.update(patch);
+			else presence.seed(patch);
+			ctx.ui.notify(
+				`pi-mqtt: worker "${workerId}" ${why} and is waiting for an orchestrator to approve it. The approval code appears here once an orchestrator offers one.`,
+				"info",
+			);
+		};
+
+		link.subscribe(topics.pair(workerId), (_topic, payload) => {
+			if (payload === undefined || !isPairMessage(payload)) return;
+			if (payload.workerId !== workerId) return;
+			if (payload.step === "challenge") {
+				if (!joinNonce || typeof payload.nonce !== "string") return;
+				const code = pairingCode({
+					room: config.mqtt.cluster,
+					workerId,
+					orchestratorId: payload.orchestratorId,
+					key: machine.key,
+					workerNonce: joinNonce,
+					orchestratorNonce: payload.nonce,
+				});
+				ctx.ui.notify(
+					`pi-mqtt: approval code ${formatPairingCode(code)} for ${payload.orchestratorId}. Compare it with the orchestrator's screen; it approves this session by typing /mqtt admit ${workerId} ${code}.`,
+					"warning",
+				);
+				return;
+			}
+			if (payload.step === "admit") {
+				if (payload.fingerprint && payload.fingerprint !== machine.fingerprint) {
+					log("warn", `ignoring approval for a different key (${payload.fingerprint})`);
+					return;
+				}
+				if (approved) return;
+				approved = true;
+				presence.update({ state: "idle", nonce: undefined, proof: undefined });
+				worker.start();
+				ctx.ui.notify(`pi-mqtt: "${workerId}" approved by ${payload.orchestratorId}; listening for tasks`, "info");
+				return;
+			}
+			// revoke: back to pending, no tasks, new nonce so the old code cannot be reused.
+			approved = false;
+			worker.stop();
+			goPending(`was revoked by ${payload.orchestratorId}`, true);
+		});
+
+		goPending("joined");
+		if (!(await announcePresence(presence, link, config, ctx))) return false;
+		presence.start();
 		connected.worker = worker;
 	}
 
@@ -505,6 +604,14 @@ function statusText(): string {
 			const queued = outstanding.length - running.length;
 			lines.push(`tasks:   ${outstanding.length} outstanding (${running.length} running, ${queued} queued)`);
 		}
+		const offers = orchestrator.pairingOffers();
+		if (offers.length > 0) {
+			lines.push(`waiting: ${offers.map((offer) => `${offer.workerId} ${formatPairingCode(offer.code)}`).join(", ")} (compare with the worker's screen; /mqtt admit)`);
+		}
+		const trusted = orchestrator.trustedWorkers();
+		lines.push(
+			`trusted: ${trusted.length === 0 ? "none" : trusted.map((worker) => `${worker.workerId} (${worker.fingerprint})`).join(", ")}`,
+		);
 		const others = orchestrator.orchestratorEntries();
 		lines.push(
 			`orchestrators: ${others.length === 0 ? "none in the room" : others.map((entry) => entry.presence.workerId).join(", ")}`,
@@ -703,7 +810,14 @@ export default function (pi: ExtensionAPI) {
 				return { content: [{ type: "text", text: inactiveReason() }], details: undefined };
 			}
 			const notice = linkDownNotice(current.link);
-			const table = current.orchestrator.combinedTable();
+			const offers = current.orchestrator.pairingOffers();
+			const waiting =
+				offers.length === 0
+					? ""
+					: `\n\nwaiting for approval (compare each code with the worker's screen, then /mqtt admit <worker> <code>):\n${offers
+							.map((offer) => `${offer.workerId} · code ${formatPairingCode(offer.code)}`)
+							.join("\n")}`;
+			const table = `${current.orchestrator.combinedTable()}${waiting}`;
 			return {
 				content: [
 					{
@@ -916,7 +1030,8 @@ export default function (pi: ExtensionAPI) {
 		description:
 			"pi-mqtt: /mqtt status, workers, tasks, connect, disconnect, kick",
 		handler: async (args, ctx) => {
-			const arg = args.trim().toLowerCase();
+			const raw = args.trim();
+			const arg = raw.toLowerCase();
 
 			if (arg === "status") {
 				ctx.ui.notify(statusText(), "info");
@@ -924,6 +1039,79 @@ export default function (pi: ExtensionAPI) {
 			}
 			if (arg === "connect") {
 				await connectRuntime(pi, ctx);
+				return;
+			}
+			if (arg.startsWith("pending")) {
+				if (!runtime?.orchestrator) {
+					ctx.ui.notify("pi-mqtt: only an orchestrator approves workers.", "info");
+					return;
+				}
+				const offers = runtime.orchestrator.pairingOffers();
+				if (offers.length === 0) {
+					ctx.ui.notify("pi-mqtt: no worker is waiting for approval.", "info");
+					return;
+				}
+				const lines = offers.map((offer) => {
+					const minutes = Math.max(0, Math.round((offer.expiresAt - Date.now()) / 60_000));
+					return `${offer.workerId} · code ${formatPairingCode(offer.code)} · expires in ${minutes}m`;
+				});
+				ctx.ui.notify(
+					[
+						"workers waiting for approval (compare each code with the worker's screen):",
+						...lines,
+						"",
+						`/mqtt admit <worker> <code>   e.g. /mqtt admit ${offers[0]?.workerId} ${offers[0]?.code}`,
+					].join("\n"),
+					"warning",
+				);
+				return;
+			}
+			if (arg.startsWith("admit")) {
+				if (!runtime?.orchestrator) {
+					ctx.ui.notify("pi-mqtt: only an orchestrator approves workers.", "info");
+					return;
+				}
+				const [, workerId, code] = raw.split(/\s+/);
+				if (!workerId || !code) {
+					ctx.ui.notify("usage: /mqtt admit <worker> <code>   (codes: /mqtt pending)", "warning");
+					return;
+				}
+				const outcome = runtime.orchestrator.admit(workerId, code);
+				ctx.ui.notify(
+					outcome.ok ? `pi-mqtt: approved "${workerId}".` : `pi-mqtt: ${outcome.error}`,
+					outcome.ok ? "info" : "warning",
+				);
+				return;
+			}
+			if (arg.startsWith("revoke")) {
+				if (!runtime?.orchestrator) {
+					ctx.ui.notify("pi-mqtt: only an orchestrator revokes workers.", "info");
+					return;
+				}
+				const workerId = raw.split(/\s+/)[1];
+				if (!workerId) {
+					ctx.ui.notify("usage: /mqtt revoke <worker>", "warning");
+					return;
+				}
+				const outcome = runtime.orchestrator.revoke(workerId);
+				ctx.ui.notify(
+					outcome.ok ? `pi-mqtt: revoked "${workerId}".` : `pi-mqtt: ${outcome.error}`,
+					outcome.ok ? "info" : "warning",
+				);
+				return;
+			}
+			if (arg.startsWith("trusted")) {
+				if (!runtime?.orchestrator) {
+					ctx.ui.notify("pi-mqtt: only an orchestrator has an approval list.", "info");
+					return;
+				}
+				const trusted = runtime.orchestrator.trustedWorkers();
+				ctx.ui.notify(
+					trusted.length === 0
+						? "pi-mqtt: no workers approved yet — a joining worker shows a code, then /mqtt admit <worker> <code>."
+						: ["approved workers:", ...trusted.map((w) => `${w.workerId} · ${w.fingerprint} · ${new Date(w.admittedAt).toISOString().slice(0, 16).replace("T", " ")}Z · by ${w.admittedBy}`)].join("\n"),
+					"info",
+				);
 				return;
 			}
 			if (arg.startsWith("kick")) {
@@ -1005,7 +1193,7 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 			if (arg) {
-				ctx.ui.notify("usage: /mqtt [status|workers|tasks|connect|disconnect|kick]", "warning");
+				ctx.ui.notify("usage: /mqtt [status|workers|tasks|pending|admit|revoke|trusted|connect|disconnect|kick]", "warning");
 				return;
 			}
 
