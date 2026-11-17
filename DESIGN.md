@@ -43,6 +43,7 @@ Config: broker credentials from env (`PI_MQTT_URL`, `PI_MQTT_USER`, `PI_MQTT_PAS
 pi/v1/<cluster>/workers/<id>/presence   retained, LWT → offline
 pi/v1/<cluster>/workers/<id>/ctl        orchestrator → worker: task | cancel
 pi/v1/<cluster>/workers/<id>/pair       orchestrator → worker: challenge | admit | revoke
+pi/v1/<cluster>/admissions/<id>         retained: the room's approval record (orchestrators only)
 pi/v1/<cluster>/workers/<id>/ack        worker → orchestrator: started
 pi/v1/<cluster>/results/<taskId>        worker → orchestrator: result
 ```
@@ -160,7 +161,9 @@ misconfigured session inert rather than quietly connected to the wrong broker.
 | QoS 1 duplicate | worker dedupes by `taskId`; orchestrator ignores a second result for a finished task |
 | Worker restart | presence flips offline→online; in-flight task is `lost` by absence |
 | Unknown worker joins | presence `pending` + key; orchestrator offers a 6-digit code; nothing is dispatched until `/mqtt admit <worker> <code>` |
-| Approved worker returns | key matches the approval list → admitted without a code |
+| Approved worker returns | key matches the room's approval record → admitted without a code |
+| Second orchestrator joins later | reads the retained approval records and adopts them; no second code |
+| Revoked worker | room record flipped to `revoked`; every orchestrator refuses it, worker goes `pending` |
 
 The orchestrator never retries on its own except the no-ack case. Every other recovery is a
 decision your session makes — which only works because `/tasks` shows outstanding work

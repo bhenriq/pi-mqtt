@@ -43,6 +43,7 @@ What the broker now separates:
 | write `workers/<id>/ctl` (dispatch) | yes | **no** |
 | write `workers/<id>/pair` (admission) | yes | **no** |
 | read `workers/<id>/pair` | no | yes |
+| readwrite `admissions/+` (the room's approvals) | yes | **no** |
 | write `control` (kick) | yes | **no** |
 | read `results/+` | yes | **no** (subscribe is granted, delivery is filtered) |
 | read `workers/+/presence`, `workers/+/ack` | yes | no |

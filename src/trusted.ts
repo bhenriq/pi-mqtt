@@ -1,94 +1,42 @@
 /**
- * Who this orchestrator has approved, per room.
+ * The approval list that predates room-scoped admissions.
  *
- * Approval is bound to the worker's *key*, not its id: ids are self-chosen, so a
- * squatter with the worker credential can wear any name. The record lives on disk so a
- * restart, a reload or a week of sleep does not turn every worker back into a stranger.
+ * Approvals used to live per orchestrator, in `trusted/<room>.json`; they now live in the
+ * room, on the retained `admissions/<workerId>` topic (see `AdmissionMessage`). This
+ * read-only reader exists so a machine that already approved workers does not have to
+ * approve them again: when a worker turns up proving the exact key in the file, and the
+ * room has no record for it, the orchestrator writes the room record from here.
+ *
+ * Deliberately not a store: nothing is read for a *decision* when the room has a record,
+ * so a stale file can never undo a revocation.
  */
 
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fingerprintOf } from "./identity.ts";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
-export interface TrustedWorker {
+export interface LegacyApproval {
 	workerId: string;
 	key: string;
 	fingerprint: string;
-	admittedAt: number;
-	admittedBy: string;
 }
 
-export class TrustStore {
-	private readonly path: string;
-	private readonly workers = new Map<string, TrustedWorker>();
-
-	constructor(
-		logDir: string,
-		private readonly room: string,
-	) {
-		this.path = join(logDir, "trusted", `${room}.json`);
-		this.load();
-	}
-
-	private load(): void {
-		try {
-			const parsed = JSON.parse(readFileSync(this.path, "utf8")) as { workers?: TrustedWorker[] };
-			for (const worker of parsed.workers ?? []) {
-				if (typeof worker?.workerId === "string" && typeof worker?.key === "string") {
-					this.workers.set(worker.workerId, worker);
-				}
-			}
-		} catch {
-			// No file yet, or an unreadable one: an empty list, never a crash at startup.
-		}
-	}
-
-	private save(): void {
-		try {
-			mkdirSync(dirname(this.path), { recursive: true });
-			const body = { room: this.room, workers: [...this.workers.values()] };
-			writeFileSync(this.path, `${JSON.stringify(body, null, 2)}\n`, { mode: 0o600 });
-		} catch {
-			// Losing the file costs re-approval after a restart, nothing worse.
-		}
-	}
-
-	/** The approval for this id, if it is for exactly this key. */
-	get(workerId: string, key: string): TrustedWorker | undefined {
-		const worker = this.workers.get(workerId);
-		return worker && worker.key === key ? worker : undefined;
-	}
-
-	entries(): TrustedWorker[] {
-		return [...this.workers.values()].sort((a, b) => a.workerId.localeCompare(b.workerId));
-	}
-
-	admit(workerId: string, key: string, admittedBy: string): TrustedWorker {
-		const worker: TrustedWorker = {
-			workerId,
-			key,
-			fingerprint: fingerprintOf(key),
-			admittedAt: Date.now(),
-			admittedBy,
+export function readLegacyApprovals(logDir: string, room: string): Map<string, LegacyApproval> {
+	const approvals = new Map<string, LegacyApproval>();
+	try {
+		const parsed = JSON.parse(readFileSync(join(logDir, "trusted", `${room}.json`), "utf8")) as {
+			workers?: Array<{ workerId?: unknown; key?: unknown; fingerprint?: unknown }>;
 		};
-		this.workers.set(workerId, worker);
-		this.save();
-		return worker;
-	}
-
-	revoke(workerId: string): boolean {
-		const removed = this.workers.delete(workerId);
-		if (removed) this.save();
-		return removed;
-	}
-
-	/** Forget everything, for tests and for "start over" moments. */
-	clear(): void {
-		this.workers.clear();
-		try {
-			rmSync(this.path, { force: true });
-		} catch {
-			// Nothing to remove.
+		for (const worker of parsed.workers ?? []) {
+			if (typeof worker.workerId === "string" && typeof worker.key === "string") {
+				approvals.set(worker.workerId, {
+					workerId: worker.workerId,
+					key: worker.key,
+					fingerprint: typeof worker.fingerprint === "string" ? worker.fingerprint : "",
+				});
+			}
 		}
+	} catch {
+		// No file: nothing to migrate.
 	}
+	return approvals;
 }

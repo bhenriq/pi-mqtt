@@ -194,7 +194,7 @@ worker is idle), `timeoutMs`, `maxCostUsd`, `repo: { baseSha | baseRef, branch }
 | Presence appears, but dispatched tasks fail with auth/model errors | The **worker** needs its own model credentials (`pi` → `/login`). The broker being reachable does not give it a model |
 | Task result says `busy with …` | A second task arrived while one ran; it was rejected rather than queued |
 | The roster empty on the orchestrator but the worker is running | Different room name or password, so they are in different namespaces |
-| A worker shows `pending` and nothing can be dispatched to it | It is waiting for approval. The orchestrator shows a code when the worker joins; compare it with the code on the worker's screen, then `/mqtt admit <worker> <code>` (`/mqtt pending` lists waiting codes) |
+| A worker shows `pending` and nothing can be dispatched to it | It is waiting for approval. The orchestrator shows a code when the worker joins; compare it with the code on the worker's screen, then `/mqtt admit <worker> <code>` (`/mqtt pending` lists waiting codes). One approval covers the whole room — an orchestrator joining later adopts it |
 | `dispatch failed: worker "x" advertises no identity key` | That worker runs a pi-mqtt older than admission. Update the package there and `/mqtt connect`; it will join `pending` and show a code |
 | A worker keeps coming back `pending` after `/mqtt revoke` | Expected: revoking deletes the approval, so the next join needs a new code |
 | pi-mqtt tools disappeared after `/reload` or a package update | Expected only for a session that was not in the room before the reload; a joined session rejoins by itself. If the transcript says it could not, `/mqtt connect` |

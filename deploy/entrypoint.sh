@@ -147,7 +147,8 @@ LEGACY
 	orchestrator)
 		cat >>"$ACL_FILE" <<ORCH
 
-# $user: orchestrator in room "$room" — dispatches, kicks, reads results.
+# $user: orchestrator in room "$room" — dispatches, kicks, reads results, and owns the
+# room's approval records (only orchestrator credentials may write them).
 user $user
 topic write pi/v1/$room/workers/+/ctl
 topic write pi/v1/$room/workers/+/pair
@@ -155,6 +156,7 @@ topic read pi/v1/$room/workers/+/presence
 topic read pi/v1/$room/workers/+/ack
 topic readwrite pi/v1/$room/control
 topic read pi/v1/$room/results/+
+topic readwrite pi/v1/$room/admissions/+
 topic readwrite pi/v1/$room/orchestrators/+/presence
 ORCH
 		;;

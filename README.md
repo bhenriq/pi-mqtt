@@ -168,12 +168,13 @@ you compare the two screens, then:                     /mqtt admit pru_misc 4819
 orchestrator stores key → worker goes idle and starts listening for tasks
 ```
 
-An approval survives restarts, reloads and sleeps: a returning worker presents a
-signature over a fresh nonce, and if the key is on file it is admitted without a code.
-`/mqtt pending` lists codes that are waiting, `/mqtt trusted` shows the approved keys,
-and `/mqtt revoke <worker>` sends a worker back to `pending` with a fresh code, so it
-must be admitted again. Approvals live in `~/.pi/agent/pi-mqtt/trusted/<room>.json`,
-per orchestrator.
+An approval is a property of the **room**, not of the orchestrator that gave it. It is
+recorded on a retained `admissions/<worker>` topic that only orchestrator credentials may
+write, so any orchestrator that joins later adopts it: one code, ever, and a returning
+worker (fresh nonce, same key) is admitted with no human involved. `/mqtt pending` lists
+codes that are waiting, `/mqtt trusted` shows the room's approved keys with who approved
+them and when, and `/mqtt revoke <worker>` writes a revocation the whole room sees — the
+worker drops back to `pending` with a fresh code.
 
 Why a code rather than a click: the code is derived from the worker's key and both
 nonces, so a squatter that connects with the worker credential — wearing the right

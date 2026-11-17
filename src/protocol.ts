@@ -140,6 +140,8 @@ export function topicsFor(cluster: string) {
 		ack: (workerId: string) => `${base}/workers/${workerId}/ack`,
 		/** Orchestrator → worker: pairing challenge, admission, revocation. */
 		pair: (workerId: string) => `${base}/workers/${workerId}/pair`,
+		/** The room's record of who was admitted, written only by orchestrators. */
+		admission: (workerId: string) => `${base}/admissions/${workerId}`,
 		result: (taskId: string) => `${base}/results/${taskId}`,
 		/** Room-wide announcements, currently only "kick". */
 		roomControl: `${base}/control`,
@@ -147,6 +149,7 @@ export function topicsFor(cluster: string) {
 		orchestratorFilter: `${base}/orchestrators/+/presence`,
 		ackFilter: `${base}/workers/+/ack`,
 		resultFilter: `${base}/results/+`,
+		admissionFilter: `${base}/admissions/+`,
 	} as const;
 }
 
@@ -230,6 +233,42 @@ export function formatPairingCode(code: string): string {
 /** The statement a worker signs to prove it holds the key it advertises. */
 export function joinStatement(input: { room: string; workerId: string; nonce: string; key: string }): string {
 	return ["pi-mqtt-join", input.room, input.workerId, input.nonce, input.key].join("\n");
+}
+
+/**
+ * The room's approval record, retained on `admissions/<workerId>`.
+ *
+ * Approving a worker is a decision about the room, not about one orchestrator's memory
+ * of it, so the record lives in the room. Only an orchestrator credential may write this
+ * topic (see the ACL), which is what makes a record trustworthy to an orchestrator that
+ * joined later: the broker enforced "an orchestrator said this", and a holder of an
+ * orchestrator credential already has room-wide authority.
+ *
+ * Revocation is a tombstone rather than a deletion: "never admitted" and "admitted, then
+ * revoked" are different, and only one of them should be re-offered a code silently.
+ */
+export interface AdmissionMessage {
+	v: number;
+	kind: "admission";
+	workerId: string;
+	state: "admitted" | "revoked";
+	/** Present when admitted: the worker key this decision is about. */
+	key?: string;
+	fingerprint?: string;
+	/** Who decided, and when. */
+	by: string;
+	at: number;
+}
+
+export function isAdmissionMessage(value: Json): value is Json & AdmissionMessage {
+	return (
+		hasEnvelope(value, "admission") &&
+		isStr(value.workerId) &&
+		(value.state === "admitted" || value.state === "revoked") &&
+		isStr(value.by) &&
+		isNum(value.at) &&
+		(value.key === undefined || isStr(value.key))
+	);
 }
 
 /** Newlines and control characters make MQTT log/topic inspection painful. */

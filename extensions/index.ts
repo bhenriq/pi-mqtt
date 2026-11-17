@@ -39,7 +39,6 @@ import {
 	type Topics,
 } from "../src/protocol.ts";
 import { applySubcommandCompletion, subcommandSuggestions } from "../src/subcommands.ts";
-import { TrustStore } from "../src/trusted.ts";
 import { Worker } from "../src/worker.ts";
 
 const FLAG_ROLE = "pi-mqtt-role";
@@ -401,9 +400,9 @@ async function connectRuntime(
 			taskExpirySec: config.worker.taskExpirySec,
 			log,
 			onFinished: (record) => deliverResult(pi, record),
-			trust: new TrustStore(config.logDir, config.mqtt.cluster),
 			orchestratorId: config.worker.workerId,
 			room: config.mqtt.cluster,
+			logDir: config.logDir,
 		});
 		// The role is granted by the credential, not declared by the client. Publishing
 		// the join is what proves it: the broker refuses a presence the credential has no

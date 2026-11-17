@@ -111,6 +111,7 @@ current = "orchestrator: ";
 expect("may dispatch to a worker", await allows(orchClient, `${base}/workers/${workerId}/ctl`));
 expect("may kick (room control)", await allows(orchClient, `${base}/control`));
 expect("may answer a join (pair channel)", await allows(orchClient, `${base}/workers/${workerId}/pair`));
+expect("may write an approval record", await allows(orchClient, `${base}/admissions/${workerId}`));
 expect("may not impersonate a worker's presence", await denies(orchClient, `${base}/workers/${workerId}/presence`));
 expect("may not publish outside its room", await denies(orchClient, `${other}/workers/${workerId}/ctl`));
 
@@ -125,6 +126,7 @@ expect("may not kick the room", await denies(workerClient, `${base}/control`));
 expect("may not answer a join (pair channel)", await denies(workerClient, `${base}/workers/${workerId}/pair`));
 const readPair = await subscribe(workerClient, `${base}/workers/${workerId}/pair`);
 check("may read the pair channel", readPair.ok, readPair.ok ? "" : `code ${readPair.code}`);
+expect("may not write an approval record", await denies(workerClient, `${base}/admissions/${workerId}`));
 
 // --- read side ------------------------------------------------------------
 // Mosquitto grants a wildcard subscribe and enforces "read" when delivering, so the
@@ -134,10 +136,12 @@ const eavesdropper = await open(worker, "eavesdrop");
 const overheard = [];
 eavesdropper.on("message", (topic) => overheard.push(topic));
 await subscribe(eavesdropper, `${base}/results/+`);
+await subscribe(eavesdropper, `${base}/admissions/+`);
 await sleep(100);
 await publish(workerClient, `${base}/results/t_${randomUUID().slice(0, 8)}`, JSON.stringify({ kind: "result" }));
+await publish(orchClient, `${base}/admissions/${workerId}`, JSON.stringify({ kind: "admission", state: "admitted" }));
 await sleep(400);
-check("a worker does not receive results", overheard.length === 0, `${overheard.length} message(s)`);
+check("a worker does not receive results or admission records", overheard.length === 0, `${overheard.length} message(s)`);
 
 // A legitimate publish has to actually arrive, not just be acknowledged.
 current = "delivery:     ";

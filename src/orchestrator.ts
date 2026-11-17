@@ -12,6 +12,7 @@ import type { LogFn, MqttLink } from "./mqtt.ts";
 import {
 	formatPairingCode,
 	isAckMessage,
+	isAdmissionMessage,
 	isPairMessage,
 	isPresenceMessage,
 	isResultMessage,
@@ -26,7 +27,8 @@ import {
 	type TaskStatus,
 	type Topics,
 } from "./protocol.ts";
-import type { TrustStore } from "./trusted.ts";
+import type { AdmissionMessage } from "./protocol.ts";
+import { readLegacyApprovals } from "./trusted.ts";
 
 export const STALE_FACTOR = 3;
 /** A worker that never acknowledges is safe to re-send: it touched nothing. */
@@ -89,12 +91,12 @@ export interface OrchestratorOptions {
 	/** Called when a task reaches a terminal state, for digest delivery. */
 	onFinished: (record: TaskRecord) => void;
 	log: LogFn;
-	/** Who this orchestrator has approved for this room. */
-	trust: TrustStore;
 	/** This session's id, so a challenge names its issuer. */
 	orchestratorId: string;
 	/** Room name: part of the join statement, so a proof cannot be replayed elsewhere. */
 	room: string;
+	/** Where the pre-room-scoped approval list used to live, for a one-time migration. */
+	logDir: string;
 	/** How long a pairing offer stays usable. */
 	pairingTtlMs?: number;
 }
@@ -123,6 +125,8 @@ export class Orchestrator {
 	}
 
 	private readonly workers = new Map<string, PresenceMessage>();
+	/** The room's approval records, read from retained `admissions/+`. */
+	private readonly admissions = new Map<string, AdmissionMessage>();
 	/** Offers by worker id, replaced when a join presents a new nonce. */
 	private readonly offers = new Map<string, PairingOffer & { workerNonce: string }>();
 	/** Joins already answered from the trusted list, so heartbeats do not re-answer. */
@@ -154,6 +158,19 @@ export class Orchestrator {
 				this.workers.set(payload.workerId, payload);
 				if (payload.state === "pending") this.considerJoiner(payload);
 				this.onWorkerState(payload.workerId);
+			}),
+			this.link.subscribe(this.topics.admissionFilter, (topic, payload) => {
+				const id = topic.split("/").pop();
+				if (!id) return;
+				if (payload === undefined) {
+					this.admissions.delete(id);
+					return;
+				}
+				if (!isAdmissionMessage(payload)) {
+					this.options.log("warn", "ignoring malformed admission record");
+					return;
+				}
+				this.admissions.set(payload.workerId, payload);
 			}),
 			this.link.subscribe(this.topics.orchestratorFilter, (topic, payload) => {
 				if (payload === undefined) {
@@ -446,18 +463,23 @@ export class Orchestrator {
 			.sort((a, b) => a.workerId.localeCompare(b.workerId));
 	}
 
-	/** Who this orchestrator has approved for this room. */
+	/** Workers this room has approved, as the room records it. */
 	trustedWorkers(): Array<{ workerId: string; fingerprint: string; admittedAt: number; admittedBy: string }> {
-		return this.options.trust.entries().map(({ workerId, fingerprint, admittedAt, admittedBy }) => ({
-			workerId,
-			fingerprint,
-			admittedAt,
-			admittedBy,
-		}));
+		return [...this.admissions.values()]
+			.filter((record) => record.state === "admitted")
+			.map((record) => ({
+				workerId: record.workerId,
+				fingerprint: record.fingerprint ?? "",
+				admittedAt: record.at,
+				admittedBy: record.by,
+			}))
+			.sort((a, b) => a.workerId.localeCompare(b.workerId));
 	}
 
+	/** Approved for the room, and the key on file is this session's key. */
 	isApproved(presence: PresenceMessage): boolean {
-		return typeof presence.key === "string" && this.options.trust.get(presence.workerId, presence.key) !== undefined;
+		const record = this.admissions.get(presence.workerId);
+		return record?.state === "admitted" && typeof presence.key === "string" && record.key === presence.key;
 	}
 
 	/**
@@ -480,20 +502,24 @@ export class Orchestrator {
 		if (typed.length !== offer.code.length || !timingSafeEqual(Buffer.from(typed), Buffer.from(offer.code))) {
 			return { ok: false, error: `wrong code for "${workerId}"` };
 		}
-		this.options.trust.admit(workerId, offer.key, this.options.orchestratorId);
 		this.offers.delete(workerId);
+		// The room record first: other orchestrators adopt it, and only then does the
+		// worker go idle.
+		this.publishAdmission({ workerId, state: "admitted", key: offer.key, fingerprint: fingerprintOf(offer.key) });
 		this.publishPair("admit", workerId, { fingerprint: fingerprintOf(offer.key) });
 		this.options.log("info", `approved ${workerId} (${fingerprintOf(offer.key)})`);
 		return { ok: true };
 	}
 
-	/** Stop trusting a worker: it goes back to `pending` on its next heartbeat. */
+	/** Stop trusting a worker, room-wide: it goes back to `pending` on its next heartbeat. */
 	revoke(workerId: string): { ok: boolean; error?: string } {
 		const offer = this.offers.get(workerId);
 		this.offers.delete(workerId);
-		if (!this.options.trust.revoke(workerId) && !offer) {
+		const record = this.admissions.get(workerId);
+		if (record?.state !== "admitted" && !offer) {
 			return { ok: false, error: `"${workerId}" is not approved` };
 		}
+		this.publishAdmission({ workerId, state: "revoked" });
 		this.publishPair("revoke", workerId);
 		this.options.log("info", `revoked ${workerId}`);
 		return { ok: true };
@@ -514,14 +540,30 @@ export class Orchestrator {
 			this.options.log("warn", `worker ${workerId} presented a key it cannot prove it holds; ignoring`);
 			return;
 		}
-		if (this.options.trust.get(workerId, key)) {
-			// A known key: approve without a human, but once per join.
+		const record = this.admissions.get(workerId);
+		if (!record) {
+			// One-time migration: the per-orchestrator file that preceded room-scoped
+			// approvals. Only for a worker that is here, proving the very key the file
+			// holds, and only when the room has no record (so a revocation is never undone).
+			const legacy = readLegacyApprovals(this.options.logDir, this.options.room).get(workerId);
+			if (legacy && legacy.key === key) {
+				this.publishAdmission({ workerId, state: "admitted", key, fingerprint: fingerprintOf(key) });
+				this.options.log("info", `${workerId} carried over from the local approval list into the room record`);
+			}
+		}
+		const adopted = this.admissions.get(workerId);
+		if (adopted?.state === "admitted" && adopted.key === key) {
+			// The room already approved this key — by this orchestrator or by one that
+			// joined earlier. Approve without a human, but once per join.
 			const joined = `${workerId}\n${nonce}`;
 			if (this.autoAdmitted.has(joined)) return;
 			this.autoAdmitted.add(joined);
 			if (this.autoAdmitted.size > 200) this.autoAdmitted.clear();
 			this.publishPair("admit", workerId, { fingerprint: fingerprintOf(key) });
-			this.options.log("info", `${workerId} rejoined with an approved key; admitting`);
+			this.options.log(
+				"info",
+				`${workerId} rejoined with a key this room already approved (${adopted.by}); admitting`,
+			);
 			return;
 		}
 
@@ -543,6 +585,26 @@ export class Orchestrator {
 			"warn",
 			`${workerId} wants to join: code ${formatPairingCode(code)} — compare it with the worker's screen, then /mqtt admit ${workerId} ${code}`,
 		);
+	}
+
+	/**
+	 * Write the room's approval record (retained, orchestrator-only topic).
+	 *
+	 * Local map first, so the caller's next dispatch sees it; then the broker, so every
+	 * other orchestrator — including ones that join tomorrow — sees it too.
+	 */
+	private publishAdmission(record: Omit<AdmissionMessage, "v" | "kind" | "by" | "at">): void {
+		const message: AdmissionMessage = {
+			v: 1,
+			kind: "admission",
+			by: this.options.orchestratorId,
+			at: Date.now(),
+			...record,
+		};
+		this.admissions.set(message.workerId, message);
+		void this.link
+			.publish(this.topics.admission(message.workerId), message, { retain: true })
+			.catch((error: unknown) => this.options.log("error", `admission record failed: ${(error as Error).message}`));
 	}
 
 	private publishPair(step: PairMessage["step"], workerId: string, extra: Partial<PairMessage> = {}): void {
