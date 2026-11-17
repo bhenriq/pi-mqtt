@@ -1,49 +1,50 @@
 {
-  "name": "pi-mqtt",
-  "version": "0.1.0",
-  "type": "module",
-  "description": "Coordinate pi sessions over MQTT: one orchestrator pins tasks to named workers",
-  "keywords": [
-    "pi-package",
-    "mqtt",
-    "multi-agent",
-    "orchestration"
-  ],
-  "pi": {
-    "extensions": [
-      "./extensions/index.ts"
-    ]
-  },
-  "scripts": {
-    "typecheck": "tsc --noEmit",
-    "broker": "sh ./scripts/broker.sh",
-    "probe": "node ./scripts/probe.mjs",
-    "dev": "sh ./scripts/dev.sh",
-    "dev:broker": "sh ./scripts/dev.sh broker",
-    "dev:worker": "sh ./scripts/dev.sh worker",
-    "dev:orchestrator": "sh ./scripts/dev.sh orchestrator"
-  },
-  "dependencies": {
-    "mqtt": "^5.16.1"
-  },
-  "peerDependencies": {
-    "@earendil-works/pi-ai": "*",
-    "@earendil-works/pi-coding-agent": "*",
-    "typebox": "*"
-  },
-  "devDependencies": {
-    "@types/node": "^22.10.0",
-    "typescript": "^5.7.0"
-  },
-  "files": [
-    "extensions",
-    "src",
-    "README.md",
-    "DESIGN.md",
-    "deploy"
-  ],
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/bhenriq/pi-mqtt.git"
-  }
+	"name": "pi-mqtt",
+	"version": "0.1.0",
+	"type": "module",
+	"description": "Coordinate pi sessions over MQTT: one orchestrator pins tasks to named workers",
+	"keywords": [
+		"pi-package",
+		"mqtt",
+		"multi-agent",
+		"orchestration"
+	],
+	"pi": {
+		"extensions": [
+			"./extensions/index.ts"
+		]
+	},
+	"scripts": {
+		"typecheck": "tsc --noEmit",
+		"broker": "sh ./scripts/broker.sh",
+		"probe": "node ./scripts/probe.mjs",
+		"dev": "sh ./scripts/dev.sh",
+		"dev:broker": "sh ./scripts/dev.sh broker",
+		"dev:worker": "sh ./scripts/dev.sh worker",
+		"dev:orchestrator": "sh ./scripts/dev.sh orchestrator",
+		"acl-check": "node ./scripts/acl-check.mjs"
+	},
+	"dependencies": {
+		"mqtt": "^5.16.1"
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-ai": "*",
+		"@earendil-works/pi-coding-agent": "*",
+		"typebox": "*"
+	},
+	"devDependencies": {
+		"@types/node": "^22.10.0",
+		"typescript": "^5.7.0"
+	},
+	"files": [
+		"extensions",
+		"src",
+		"README.md",
+		"DESIGN.md",
+		"deploy"
+	],
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/bhenriq/pi-mqtt.git"
+	}
 }

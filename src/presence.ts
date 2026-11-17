@@ -83,6 +83,8 @@ export class Presence {
 	private current: PresenceMessage;
 	private timer: NodeJS.Timeout | undefined;
 	private stopped = false;
+	/** Set by `announce()`, so `start()` does not publish the join twice. */
+	private announced = false;
 
 	constructor(
 		private readonly link: MqttLink,
@@ -103,9 +105,27 @@ export class Presence {
 	}
 
 	start(): void {
-		void this.publish();
+		if (!this.announced) void this.publish();
 		this.timer = setInterval(() => void this.publish(), this.heartbeatMs);
 		this.timer.unref?.();
+	}
+
+	/**
+	 * Publish presence once and let a failure through, unlike the heartbeat.
+	 *
+	 * This first publish is also the credential check. A role is a capability on the
+	 * broker now: a worker credential writing an orchestrator presence is acknowledged
+	 * with 0x87 "not authorized". Swallowing that would leave a session that believes it
+	 * joined, hears nothing, and blames the workers — the failure mode this project has
+	 * already spent a day on.
+	 */
+	async announce(): Promise<void> {
+		await this.link.publish(
+			this.topic,
+			{ ...this.current, updatedAt: Date.now() },
+			{ retain: true, expirySec: this.expirySec },
+		);
+		this.announced = true;
 	}
 
 	/** Publish a state change immediately (and restart the heartbeat window). */

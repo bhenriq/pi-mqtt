@@ -334,6 +334,38 @@ async function connectRuntime(
 	}
 
 	const connected: Runtime = { config, topics, link, pending: [] };
+	const presence =
+		config.role === "orchestrator"
+			? new Presence(
+					link,
+					topics.orchestratorPresence(config.worker.workerId),
+					identity,
+					config.worker.heartbeatMs,
+					log,
+					86_400,
+					"orchestrator",
+				)
+			: new Presence(link, topics.presence(config.worker.workerId), identity, config.worker.heartbeatMs, log);
+	connected.presence = presence;
+
+	// The role is granted by the credential, not declared by the client. Publishing the
+	// join is what proves it: the broker refuses a presence the credential has no right
+	// to, and continuing past that would be a session that only looks connected.
+	try {
+		await presence.announce();
+	} catch (error) {
+		await link.close();
+		const reason = (error as Error).message;
+		const denied = (error as { code?: unknown }).code === 135 || /not authoriz/i.test(reason);
+		ctx.ui.notify(
+			denied
+				? `pi-mqtt: the broker refused this session as ${config.role} (credential "${config.mqtt.username ?? "?"}", room ${config.mqtt.cluster}). Roles are granted by the credential, not by config: use the credential the broker issued for this role, or ask for one. See deploy/README.md.`
+				: `pi-mqtt: could not join ${topics.base}: ${reason}`,
+			"error",
+		);
+		return false;
+	}
+
 	if (config.role === "orchestrator") {
 		const orchestrator = new Orchestrator(link, topics, {
 			heartbeatMs: config.worker.heartbeatMs,
@@ -343,29 +375,10 @@ async function connectRuntime(
 		});
 		orchestrator.start();
 		connected.orchestrator = orchestrator;
-		const sessionId = config.worker.workerId;
-		const presence = new Presence(
-			link,
-			topics.orchestratorPresence(sessionId),
-			{ ...identity, workerId: sessionId },
-			config.worker.heartbeatMs,
-			log,
-			86_400,
-			"orchestrator",
-		);
 		presence.start();
-		connected.presence = presence;
 		pi.setActiveTools([...new Set([...pi.getActiveTools(), ...ORCHESTRATOR_TOOLS])]);
 	} else {
-		const presence = new Presence(
-			link,
-			topics.presence(config.worker.workerId),
-			identity,
-			config.worker.heartbeatMs,
-			log,
-		);
 		presence.start();
-		connected.presence = presence;
 		const worker = new Worker(link, topics, { pi, ctx: () => currentCtx, config, presence, log });
 		worker.start();
 		connected.worker = worker;

@@ -103,7 +103,8 @@ stops. There is no id override: the id is always `<name>_<pi session name>`.
 
 | `broker.url` | The scheme picks the transport: `wss://` (TLS WebSocket, usual for a hosted broker), `mqtts://` (TLS on a raw port), `mqtt://`/`ws://` (plain, local only) |
 | `room.name` | The room — also the topic prefix. Everyone who should see each other must share it |
-| `room.password` | The room's shared password. Anyone holding it can join the room |
+| `room.password` | Room password for the legacy single-`cluster`-user broker. With role-scoped credentials, set `mqtt.username`/`mqtt.password` instead |
+| `mqtt.username` / `mqtt.password` | The credential this machine joins with. In a role-scoped deploy this is what grants the role |
 | `connect` | `"manual"` (default) connects only when you run `/mqtt connect`; `"auto"` connects at session start, and only for a named session (`pi --name x`) |
 | `worker` | Optional behaviour: `heartbeatMs`, `taskExpirySec`, `allowModelOverride`, `repos` |
 
@@ -224,13 +225,13 @@ environment.
 
 - Only the TLS WebSocket endpoint is public; the plain listeners stay inside the
   container.
-- Every client needs the room password. With one shared password the broker cannot
-  tell sessions apart, so any member can read every task and result, and can publish
-  as any worker id. The remaining checks are in the payload: a worker ignores tasks not
-  addressed to it, and the orchestrator ignores results whose `workerId` differs from
-  the worker the task was pinned to.
-- The orchestrator now rejects a result whose `workerId` does not match the pinned
-  worker, but with a shared password a hostile member can still claim the right id;
-  treat every machine holding the room password as trusted.
-- Keep `pi-mqtt.json` at mode `600` and out of any repository. On a worker the
-  file contains the room password, which is the whole cluster's access.
+- Every client needs a credential for its role. Roles are separated by the broker: a
+  worker credential cannot dispatch, kick, or read results. Workers still share one
+  credential among themselves, so any worker can read every worker's control topic and
+  overwrite another worker's presence entry — see
+  [deploy/README.md](./deploy/README.md) for the format and the remaining limits.
+- The orchestrator rejects a result whose `workerId` does not match the pinned worker,
+  but a hostile worker credential can still claim the right id; treat every machine
+  holding the worker credential as trusted.
+- Keep `pi-mqtt.json` at mode `600` and out of any repository. On a worker the file
+  holds the worker credential, which is access to every worker in the room.

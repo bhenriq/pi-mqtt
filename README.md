@@ -212,19 +212,24 @@ A broker is deployed on Railway and reachable as
 `wss://broker-production-0bfd.up.railway.app` (MQTT over TLS WebSocket, port 443).
 Join a room with its name and password:
 
+Each machine carries the credential for its role — orchestrator credentials may
+dispatch and kick, worker credentials may only be dispatched to:
+
 ```bash
 export PI_MQTT_URL=wss://broker-production-0bfd.up.railway.app
 
-# orchestrator
-pi                                   # config: role orchestrator, room "dev"
+# orchestrator: the broker grants the role, the config only declares it
+pi --pi-mqtt-role orchestrator   # config: room "dev", mqtt.username/password
 /mqtt connect
 
 # worker
-PI_MQTT_ROOM=dev PI_MQTT_ROOM_PASSWORD=... \
+PI_MQTT_ROOM=dev PI_MQTT_USERNAME=pru PI_MQTT_PASSWORD=... \
   scripts/dev.sh worker -u "$PI_MQTT_URL" -i worker-1
 ```
 
-Setup, caveats, and the single broker credential: [deploy/README.md](./deploy/README.md).
+Roles are enforced by the broker: a worker credential that tries to join as an
+orchestrator is refused at join instead of half-working. Setup, the credential format,
+and the remaining limits: [deploy/README.md](./deploy/README.md).
 
 ## Configuration
 

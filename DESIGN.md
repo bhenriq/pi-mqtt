@@ -23,10 +23,14 @@ Config: broker credentials from env (`PI_MQTT_URL`, `PI_MQTT_USER`, `PI_MQTT_PAS
 ## Transport
 
 - Mosquitto on Railway, **MQTT 5**, public endpoint, TLS (`8883`, or TCP proxy with TLS).
-- **One room password**: a single broker user (`cluster`) carries the room's shared
-  secret. Rooms are a name plus that password; membership is the password. The
-  superseded per-role design (one user per machine, ACLs keyed on `%u`) is described
-  at the end of this document.
+- **Role-scoped credentials**: the broker has one user that may orchestrate (dispatch,
+  kick, read results) and one that may only be orchestrated (receive tasks, report),
+  both scoped to a room by ACL. Role is therefore a capability the broker grants, not a
+  claim the client makes: the join publishes its presence, and a credential without the
+  right is refused with `0x87`. What remains shared is the worker credential itself, so
+  workers cannot be told apart from one another — per-device isolation needs a topic
+  layout with the worker name as its own level. A single `cluster` user (one room
+  password, full read/write) is still accepted as the legacy grant.
 - Topic prefix carries the room name, so separate rooms never collide.
 - **QoS 1** everywhere; dedupe by `taskId` (see failure policy).
 - **Message expiry** on tasks (default 15 min) so a laptop that wakes up 40 minutes later
