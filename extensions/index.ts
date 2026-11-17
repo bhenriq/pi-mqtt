@@ -82,6 +82,8 @@ interface Runtime {
 	worker?: Worker;
 	/** Digests waiting for the coalescing window to close. */
 	pending: TaskRecord[];
+	/** Worker only: the code an orchestrator is waiting for us to confirm. */
+	pairing?: { code: string; orchestratorId: string; expiresAt: number };
 	timer?: NodeJS.Timeout;
 }
 
@@ -453,8 +455,13 @@ async function connectRuntime(
 					workerNonce: joinNonce,
 					orchestratorNonce: payload.nonce,
 				});
+				connected.pairing = {
+					code,
+					orchestratorId: payload.orchestratorId,
+					expiresAt: payload.expiresAt ?? Date.now() + 10 * 60 * 1000,
+				};
 				ctx.ui.notify(
-					`pi-mqtt: approval code ${formatPairingCode(code)} for ${payload.orchestratorId}. Compare it with the orchestrator's screen; it approves this session by typing /mqtt admit ${workerId} ${code}.`,
+					`pi-mqtt: approval code ${formatPairingCode(code)} for ${payload.orchestratorId}. Compare it with the orchestrator's screen; it approves this session by typing /mqtt admit ${workerId} ${code}. \`/mqtt status\` shows it again.`,
 					"warning",
 				);
 				return;
@@ -466,6 +473,7 @@ async function connectRuntime(
 				}
 				if (approved) return;
 				approved = true;
+				connected.pairing = undefined;
 				presence.update({ state: "idle", nonce: undefined, proof: undefined });
 				worker.start();
 				ctx.ui.notify(`pi-mqtt: "${workerId}" approved by ${payload.orchestratorId}; listening for tasks`, "info");
@@ -473,6 +481,7 @@ async function connectRuntime(
 			}
 			// revoke: back to pending, no tasks, new nonce so the old code cannot be reused.
 			approved = false;
+			connected.pairing = undefined;
 			worker.stop();
 			goPending(`was revoked by ${payload.orchestratorId}`, true);
 		});
@@ -618,8 +627,22 @@ function statusText(): string {
 		);
 		lines.push("roster:  /mqtt workers for the table");
 	} else {
-		const presence = runtime.worker;
-		lines.push(presence ? `worker:  idle, listening for tasks` : "worker:  idle");
+		const state = runtime.presence?.state ?? "idle";
+		if (state === "pending") {
+			lines.push("worker:  pending — no orchestrator has approved this session");
+			const pairing = runtime.pairing;
+			if (pairing && pairing.expiresAt > Date.now()) {
+				const minutes = Math.max(0, Math.round((pairing.expiresAt - Date.now()) / 60_000));
+				lines.push(
+					`code:    ${formatPairingCode(pairing.code)} (from ${pairing.orchestratorId}, expires in ${minutes}m) — compare it with the orchestrator's screen`,
+				);
+			} else {
+				lines.push("code:    none yet — an orchestrator offers one when it is in the room");
+			}
+			lines.push("tasks:   none accepted until it is approved");
+		} else {
+			lines.push(`worker:  ${state}, listening for tasks`);
+		}
 		lines.push("peers:   not visible from a worker (the ACLs allow only its own topics)");
 	}
 
