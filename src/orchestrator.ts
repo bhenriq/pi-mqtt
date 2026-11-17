@@ -131,6 +131,8 @@ export class Orchestrator {
 	private readonly offers = new Map<string, PairingOffer & { workerNonce: string }>();
 	/** Joins already answered from the trusted list, so heartbeats do not re-answer. */
 	private readonly autoAdmitted = new Set<string>();
+	/** Delayed one-time migration of the pre-room-scoped approval file. */
+	private migrationTimer: NodeJS.Timeout | undefined;
 	private readonly orchestrators = new Map<string, PresenceMessage>();
 	private readonly tasks = new Map<string, TaskRecord>();
 	private readonly unsubscribes: Array<() => void> = [];
@@ -208,9 +210,15 @@ export class Orchestrator {
 				this.finish(record, payload);
 			}),
 		);
+		// Give the retained admission records a moment to arrive, then carry over what the
+		// old per-orchestrator file had approved for workers already in the room. Deferred
+		// so a revocation the room already records is never overwritten by a stale file.
+		this.migrationTimer = setTimeout(() => this.migrateLegacyApprovals(), 1500);
+		this.migrationTimer.unref?.();
 	}
 
 	stop(): void {
+		if (this.migrationTimer) clearTimeout(this.migrationTimer);
 		for (const unsubscribe of this.unsubscribes) unsubscribe();
 		this.unsubscribes.length = 0;
 		for (const timer of this.ackTimers.values()) clearTimeout(timer);
@@ -585,6 +593,23 @@ export class Orchestrator {
 			"warn",
 			`${workerId} wants to join: code ${formatPairingCode(code)} — compare it with the worker's screen, then /mqtt admit ${workerId} ${code}`,
 		);
+	}
+
+	/**
+	 * Carry a machine's old approvals into the room record.
+	 *
+	 * Only for a worker that is present right now, proving the very key the file holds,
+	 * and only when the room has no record for it — so a revocation is never undone.
+	 */
+	private migrateLegacyApprovals(): void {
+		this.migrationTimer = undefined;
+		for (const [workerId, legacy] of readLegacyApprovals(this.options.logDir, this.options.room)) {
+			if (this.admissions.has(workerId)) continue;
+			const presence = this.workers.get(workerId);
+			if (!presence || presence.key !== legacy.key) continue;
+			this.options.log("info", `carrying ${workerId} over from the local approval list into the room record`);
+			this.publishAdmission({ workerId, state: "admitted", key: legacy.key, fingerprint: legacy.fingerprint });
+		}
 	}
 
 	/**
