@@ -6,3 +6,9 @@ pi-mqtt.json
 
 # locally generated TLS material
 certs/
+
+# generated per-machine secrets: the identity holds a private key, the trust list
+# holds the keys this host has approved. Runtime puts them in ~/.pi/agent/pi-mqtt/,
+# but logDir is configurable, so keep them out of a checkout either way.
+identity.json
+trusted/
