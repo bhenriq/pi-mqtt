@@ -26,6 +26,8 @@ export interface PresenceIdentity {
 	model?: string;
 	/** This machine's long-term public key: what an orchestrator approves. */
 	key?: string;
+	/** What this client understands; absent means an older client. */
+	capabilities?: string[];
 }
 
 /** A heartbeat is not worth four seconds of waiting; the next one is due in 30. */

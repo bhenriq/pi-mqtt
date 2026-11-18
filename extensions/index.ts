@@ -27,9 +27,10 @@ import {
 import { readGitInfo } from "../src/git.ts";
 import { MqttLink, type LogFn } from "../src/mqtt.ts";
 import { loadOrCreateIdentity } from "../src/identity.ts";
-import { Orchestrator, PING_TIMEOUT_MS, type TaskRecord } from "../src/orchestrator.ts";
+import { Orchestrator, PING_TIMEOUT_MS, RECENT_TRAFFIC_MS, type TaskRecord } from "../src/orchestrator.ts";
 import { Presence, buildPresence, probePresence, type PresenceIdentity } from "../src/presence.ts";
 import {
+	CLIENT_CAPABILITIES,
 	formatPairingCode,
 	isKickMessage,
 	isPairMessage,
@@ -68,6 +69,8 @@ interface PingDetails {
 	answered: boolean;
 	error?: string;
 	ageMs?: number;
+	unsupported?: boolean;
+	recentTrafficMs?: number;
 	rttMs?: number;
 	state?: string;
 	activeTaskId?: string;
@@ -349,6 +352,7 @@ async function connectRuntime(
 		...(git.headSha ? { headSha: git.headSha } : {}),
 		...(model ? { model } : {}),
 		key: machine.key,
+		capabilities: CLIENT_CAPABILITIES,
 	};
 
 	const isWorker = config.role === "worker";
@@ -1104,16 +1108,27 @@ export default function (pi: ExtensionAPI) {
 			const entry = current.orchestrator.entries().find((item) => item.presence.workerId === params.worker);
 			const age = entry ? `last heartbeat ${Math.round(entry.ageMs / 1000)}s ago` : "not in the roster";
 			if (!result.ok) {
-				const failed: PingDetails = { worker: params.worker, answered: false, error: result.error, ageMs: entry?.ageMs };
+				const failed: PingDetails = {
+					worker: params.worker,
+					answered: false,
+					error: result.error,
+					ageMs: entry?.ageMs,
+					unsupported: result.unsupported,
+					recentTrafficMs: result.recentTrafficMs,
+				};
+				const recent = result.recentTrafficMs;
+				const text =
+					result.unsupported === true
+						? `${params.worker}: its client does not understand probes (older pi-mqtt) — update it there` +
+							(recent === undefined ? "." : `; it last answered a task ${Math.round(recent / 1000)}s ago, so it is alive.`)
+						: recent !== undefined && recent < RECENT_TRAFFIC_MS
+							? `${params.worker}: no pong in time, but it answered a task ${Math.round(recent / 1000)}s ago — alive, and its client may be older than probes.`
+							: `${params.worker}: no answer (${result.error}); ${age}. It may be wedged — check the box, or /mqtt workers.`;
 				return {
-					content: [
-						{
-							type: "text",
-							text: `${params.worker}: no answer (${result.error}); ${age}. It may be wedged — check the box, or /mqtt workers.`,
-						},
-					],
+					content: [{ type: "text", text }],
 					details: failed,
-					isError: true,
+					isError: !(result.unsupported === true && recent !== undefined && recent < RECENT_TRAFFIC_MS) &&
+						!(recent !== undefined && recent < RECENT_TRAFFIC_MS),
 				};
 			}
 			const lag = typeof result.heartbeatLagMs === "number" && result.heartbeatLagMs > 1000 ? `, its heartbeat ran ${Math.round(result.heartbeatLagMs / 1000)}s late` : "";
@@ -1236,11 +1251,22 @@ export default function (pi: ExtensionAPI) {
 					return;
 				}
 				const answered = await runtime.orchestrator.ping(workerId);
+				if (answered.ok) {
+					ctx.ui.notify(
+						`pi-mqtt: ${workerId} answered in ${answered.rttMs}ms (${answered.state}${answered.activeTaskId ? `, ${answered.activeTaskId}` : ""})`,
+						"info",
+					);
+					return;
+				}
+				const recent = answered.recentTrafficMs;
 				ctx.ui.notify(
-					answered.ok
-						? `pi-mqtt: ${workerId} answered in ${answered.rttMs}ms (${answered.state}${answered.activeTaskId ? `, ${answered.activeTaskId}` : ""})`
-						: `pi-mqtt: ${workerId} did not answer — ${answered.error}`,
-					answered.ok ? "info" : "warning",
+					answered.unsupported === true
+						? `pi-mqtt: ${workerId}'s client does not understand probes (older pi-mqtt) — update it` +
+								(recent === undefined ? "" : `; it last answered a task ${Math.round(recent / 1000)}s ago`)
+						: recent !== undefined && recent < RECENT_TRAFFIC_MS
+							? `pi-mqtt: ${workerId} did not answer in time, but it answered a task ${Math.round(recent / 1000)}s ago — alive`
+							: `pi-mqtt: ${workerId} did not answer — ${answered.error}`,
+					"warning",
 				);
 				return;
 			}

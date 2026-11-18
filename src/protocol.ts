@@ -10,6 +10,14 @@ import { createHash } from "node:crypto";
 
 export const PROTOCOL_VERSION = 1;
 export const CLIENT_VERSION = "0.1.0";
+/**
+ * What this client can do, advertised in presence (`capabilities`).
+ *
+ * Presence is the only place another session learns what it is talking to, and a missing
+ * capability must read as "older client, do not assume", not as a fault: a probe sent to a
+ * client that predates probes looks exactly like a dead worker otherwise.
+ */
+export const CLIENT_CAPABILITIES = ["probe"];
 
 export type Role = "orchestrator" | "worker";
 /** `pending`: joined, but no orchestrator has approved this session yet. */
@@ -144,6 +152,8 @@ export interface PresenceMessage {
 	nonce?: string;
 	/** Ed25519 signature over the join statement, proving the key is ours. */
 	proof?: string;
+	/** What this client understands, e.g. `["probe"]`. Absent means an older client. */
+	capabilities?: string[];
 }
 
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;

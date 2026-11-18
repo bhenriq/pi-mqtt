@@ -118,10 +118,19 @@ const DEFAULT_PAIRING_TTL_MS = 10 * 60 * 1000;
 export const PING_TIMEOUT_MS = 5000;
 /** A ping answered this recently is better evidence than a heartbeat age. */
 export const PING_GRACE_FACTOR = 3;
+/** Task traffic this recent is evidence a worker is alive even if it cannot answer probes. */
+export const RECENT_TRAFFIC_MS = 30_000;
 
 export type ProbeResult =
 	| { ok: true; rttMs: number; state: WorkerState; activeTaskId?: string; heartbeatLagMs?: number }
-	| { ok: false; error: string };
+	| {
+			ok: false;
+			error: string;
+			/** The worker's client predates probes, so silence means nothing about health. */
+			unsupported?: true;
+			/** How long ago this worker last acked or reported, which is evidence of life. */
+			recentTrafficMs?: number;
+	  };
 
 /** The last answer a worker gave to a probe, for the roster. */
 export interface ProbeRecord {
@@ -158,6 +167,8 @@ export class Orchestrator {
 	>();
 	/** Last probe result per worker, so `entries()` can trust an answer over an age. */
 	private readonly probes = new Map<string, ProbeRecord>();
+	/** Last time a worker acked or reported, which is evidence even without probes. */
+	private readonly traffic = new Map<string, number>();
 	private readonly orchestrators = new Map<string, PresenceMessage>();
 	private readonly tasks = new Map<string, TaskRecord>();
 	private readonly unsubscribes: Array<() => void> = [];
@@ -218,6 +229,7 @@ export class Orchestrator {
 				if (!record) return;
 				record.state = "running";
 				record.startedAt = payload.startedAt;
+				this.traffic.set(record.task.to, Date.now());
 				this.clearAckTimer(payload.taskId);
 			}),
 			this.link.subscribe(this.topics.resultFilter, (_topic, payload) => {
@@ -236,6 +248,7 @@ export class Orchestrator {
 					);
 					return;
 				}
+				this.traffic.set(payload.workerId, Date.now());
 				this.finish(record, payload);
 			}),
 		);
@@ -265,7 +278,10 @@ export class Orchestrator {
 				// Someone answering a probe is alive whatever its heartbeat timer thinks: that
 				// is exactly the "throttled process" case this exists for.
 				const probe = this.probes.get(presence.workerId);
-				const verified = probe?.answered === true && now - probe.at < staleAfter * PING_GRACE_FACTOR;
+				const trafficAt = this.traffic.get(presence.workerId);
+				const window = staleAfter * PING_GRACE_FACTOR;
+				const verified =
+					(probe?.answered === true && now - probe.at < window) || (trafficAt !== undefined && now - trafficAt < window);
 				return { presence, ageMs, stale: presence.state !== "offline" && ageMs > staleAfter && !verified };
 			})
 			.sort((a, b) => a.presence.workerId.localeCompare(b.presence.workerId));
@@ -303,11 +319,20 @@ export class Orchestrator {
 			// trip is cheaper than a false "offline", and it is the only way to tell a
 			// throttled process from a wedged one.
 			const answer = await this.ping(params.to, PING_TIMEOUT_MS);
-			if (!answer.ok) {
+			if (!this.isAnswering(params.to, answer)) {
+				const recent = this.recentTrafficMs(params.to);
+				const why = answer.ok ? "answered" : answer.error;
 				return {
 					ok: false,
-					error: `worker "${params.to}" did not answer a ping (last heartbeat ${Math.round(entry.ageMs / 1000)}s ago): ${answer.error}`,
+					error:
+						`worker "${params.to}" did not answer a ping (last heartbeat ${Math.round(entry.ageMs / 1000)}s ago): ${why}` +
+						(recent === undefined ? "" : `; no task traffic for ${Math.round(recent / 1000)}s`),
 				};
+			}
+			if (!answer.ok) {
+				const why = answer.unsupported ? "older client" : answer.error;
+				const recent = Math.round((this.recentTrafficMs(params.to) ?? 0) / 1000);
+				this.options.log("info", `${params.to} did not answer a probe (${why}) but answered a task ${recent}s ago; dispatching`);
 			}
 			const refreshed = this.entries().find((item) => item.presence.workerId === params.to) ?? entry;
 			if (refreshed.stale) {
@@ -708,13 +733,30 @@ export class Orchestrator {
 	 */
 	ping(workerId: string, timeoutMs = PING_TIMEOUT_MS): Promise<ProbeResult> {
 		if (!this.link.online) return Promise.resolve({ ok: false, error: "not connected to the broker" });
+		const entry = this.entries().find((item) => item.presence.workerId === workerId);
+		const recent = this.recentTrafficMs(workerId);
+		const recentPart = recent === undefined ? {} : { recentTrafficMs: recent };
+		if (entry && !entry.presence.capabilities?.includes("probe")) {
+			// Silence from a client that cannot answer would be read as death: say what it is.
+			return Promise.resolve({
+				ok: false,
+				error: "that worker's client does not understand probes (older pi-mqtt); update it",
+				unsupported: true,
+				...recentPart,
+			});
+		}
 		const probeId = newProbeId();
 		const sentAt = Date.now();
 		return new Promise<ProbeResult>((resolve) => {
 			const timer = setTimeout(() => {
 				this.pendingProbes.delete(probeId);
 				this.probes.set(workerId, { at: Date.now(), answered: false });
-				resolve({ ok: false, error: `no answer in ${timeoutMs}ms` });
+				const late = this.recentTrafficMs(workerId);
+				resolve({
+					ok: false,
+					error: `no answer in ${timeoutMs}ms`,
+					...(late === undefined ? {} : { recentTrafficMs: late }),
+				});
 			}, timeoutMs);
 			timer.unref?.();
 			this.pendingProbes.set(probeId, { workerId, at: sentAt, timer, resolve });
@@ -731,6 +773,19 @@ export class Orchestrator {
 	/** The last probe result for a worker, for the roster. */
 	lastProbe(workerId: string): ProbeRecord | undefined {
 		return this.probes.get(workerId);
+	}
+
+	/** How long ago this worker last acked or reported, if ever. */
+	recentTrafficMs(workerId: string): number | undefined {
+		const at = this.traffic.get(workerId);
+		return at === undefined ? undefined : Date.now() - at;
+	}
+
+	/** Evidence of life that does not depend on the worker understanding probes. */
+	private isAnswering(workerId: string, probe: ProbeResult): boolean {
+		if (probe.ok) return true;
+		const recent = this.recentTrafficMs(workerId);
+		return recent !== undefined && recent < RECENT_TRAFFIC_MS;
 	}
 
 	/** One column's worth of "did it answer, and how fast". */
