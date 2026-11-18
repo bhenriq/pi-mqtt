@@ -28,6 +28,9 @@ export interface PresenceIdentity {
 	key?: string;
 }
 
+/** A heartbeat is not worth four seconds of waiting; the next one is due in 30. */
+const HEARTBEAT_TIMEOUT_MS = 2000;
+
 export type PresencePatch = Partial<
 	Pick<
 		PresenceMessage,
@@ -90,6 +93,10 @@ export class Presence {
 	private stopped = false;
 	/** Set by `announce()`, so `start()` does not publish the join twice. */
 	private announced = false;
+	/** Do not stack heartbeats when the broker is not answering. */
+	private publishing = false;
+	/** Whether the current streak of failed publishes has already been reported. */
+	private failing = false;
 
 	constructor(
 		private readonly link: MqttLink,
@@ -122,8 +129,8 @@ export class Presence {
 	}
 
 	start(): void {
-		if (!this.announced) void this.publish();
-		this.timer = setInterval(() => void this.publish(), this.heartbeatMs);
+		if (!this.announced) void this.publish(HEARTBEAT_TIMEOUT_MS);
+		this.timer = setInterval(() => void this.publish(HEARTBEAT_TIMEOUT_MS), this.heartbeatMs);
 		this.timer.unref?.();
 	}
 
@@ -164,6 +171,9 @@ export class Presence {
 		if (this.stopped) return;
 		this.stopped = true;
 		if (this.timer) clearInterval(this.timer);
+		// Nothing to clear on the broker if we are not on it; trying would open a second
+		// connection and wait for it, which is the wrong way to spend a quit.
+		if (!this.link.online) return;
 		try {
 			// Bounded: leaving must not hold up quitting when the broker is unreachable.
 			await Promise.race([
@@ -187,16 +197,30 @@ export class Presence {
 		void this.publish();
 	}
 
-	private async publish(): Promise<void> {
-		if (this.stopped || !this.link.online) return;
+	private async publish(waitMs = HEARTBEAT_TIMEOUT_MS): Promise<void> {
+		if (this.stopped || this.publishing || !this.link.online) return;
+		this.publishing = true;
 		try {
 			await this.link.publish(
 				this.topic,
 				{ ...this.current, updatedAt: Date.now() },
 				{ retain: true, expirySec: this.expirySec },
+				waitMs,
 			);
+			if (this.failing) {
+				this.failing = false;
+				this.log("info", "presence is being delivered again");
+			}
 		} catch (error) {
-			this.log("warn", `presence publish failed: ${(error as Error).message}`);
+			// A heartbeat that the broker did not acknowledge is one symptom of a link that
+			// is already reporting itself; a warning per beat is noise on top of noise.
+			if (this.failing) this.log("info", `presence publish failed again: ${(error as Error).message}`);
+			else {
+				this.failing = true;
+				this.log("warn", `presence is not being delivered: ${(error as Error).message}`);
+			}
+		} finally {
+			this.publishing = false;
 		}
 	}
 }

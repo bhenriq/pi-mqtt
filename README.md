@@ -220,8 +220,11 @@ in about 22s.
 
 Retries start at `reconnectMs` (2s) and double to a 30s ceiling, so a broker that is unreachable —
 DNS failure, deploy in progress, laptop off the network — costs two attempts a minute instead of
-one every 2s. An outage is one warning and one `drops:` increment; the individual retries are logged
-at info level, which is what bare `/mqtt` prints and notifications do not.
+one every 2s. Sound follows the same rule: **one warning per incident**, not per attempt. A link that
+keeps dropping gets one warning a minute and is counted at info; a heartbeat the broker did not
+acknowledge warns once and then stays quiet until it is delivered again; and when the link already
+knows it is down, the heartbeat says nothing at all. Quitting never waits on a socket that is not
+answering. The detail lives in bare `/mqtt` and `/mqtt status` (`drops:`), not in notifications.
 
 `dispatch_task` options worth knowing: `notify: "silent" | "wake"`, `ifBusy: "fail" | "wait"`,
 `timeoutMs`, `maxCostUsd`, and `repo: { baseRef | baseSha, branch }`.

@@ -12,6 +12,8 @@ import { decodePayload, type Json } from "./protocol.ts";
 const PUBLISH_TIMEOUT_MS = 4000;
 /** Ceiling for the reconnect backoff: an unreachable broker is retried twice a minute. */
 const MAX_RECONNECT_MS = 30_000;
+/** Drops closer together than this are one incident, not one notification each. */
+const FLAP_WINDOW_MS = 60_000;
 
 export interface PublishOptions {
 	retain?: boolean;
@@ -54,6 +56,8 @@ export class MqttLink {
 	private closeInfo: CloseInfo | undefined;
 	/** Outages, not attempts: a minute of DNS failure is one drop, not thirty. */
 	private reconnectCount = 0;
+	/** Recent drops, to tell a long outage from a connection that keeps flapping. */
+	private readonly recentDrops: number[] = [];
 	/** Own retry loop: mqtt.js's fixed period cannot back off, so it is disabled. */
 	private reconnectTimer: NodeJS.Timeout | undefined;
 	private reconnectAttempts = 0;
@@ -147,7 +151,16 @@ export class MqttLink {
 			if (this.offlineSince === undefined) {
 				this.reconnectCount += 1;
 				this.offlineSince = Date.now();
-				options.log("warn", `mqtt connection lost (${detail}); retrying in the background`);
+				// One notification a minute, however often the socket dies: a flapping link
+				// otherwise resets the backoff each time it reconnects and turns into a
+				// notification every few seconds.
+				const now = Date.now();
+				this.recentDrops.push(now);
+				while (this.recentDrops.length > 0 && now - (this.recentDrops[0] ?? now) > FLAP_WINDOW_MS) {
+					this.recentDrops.shift();
+				}
+				if (this.recentDrops.length === 1) options.log("warn", `mqtt connection lost (${detail}); retrying in the background`);
+				else options.log("info", `mqtt connection lost again (${detail}); ${this.recentDrops.length} drops in the last minute`);
 			} else {
 				options.log("info", `mqtt still offline (${detail})`);
 			}
@@ -253,7 +266,7 @@ export class MqttLink {
 		};
 	}
 
-	publish(topic: string, payload: unknown, options: PublishOptions = {}): Promise<void> {
+	publish(topic: string, payload: unknown, options: PublishOptions = {}, waitMs = PUBLISH_TIMEOUT_MS): Promise<void> {
 		const client = this.client;
 		if (!client) return Promise.reject(new Error("mqtt link is not connected"));
 		const publishOptions: IClientPublishOptions = { qos: 1, retain: options.retain ?? false };
@@ -263,7 +276,7 @@ export class MqttLink {
 		return new Promise((resolve, reject) => {
 			// A publish queued while the socket is down never calls back; do not let a
 			// caller (or a purge loop) hang on it.
-			const timer = setTimeout(() => reject(new Error(`publish to ${topic} timed out`)), PUBLISH_TIMEOUT_MS);
+			const timer = setTimeout(() => reject(new Error(`publish to ${topic} timed out`)), waitMs);
 			client.publish(topic, Buffer.from(JSON.stringify(payload)), publishOptions, (error) => {
 				clearTimeout(timer);
 				if (error) reject(error);
@@ -344,9 +357,22 @@ export class MqttLink {
 		const client = this.client;
 		this.client = undefined;
 		if (!client) return;
+		// A clean goodbye when the socket works, and no waiting when it does not: quitting
+		// must not hang behind a half-open connection, which is exactly when people quit.
+		let settled = false;
 		await new Promise<void>((resolve) => {
-			client.end(false, {}, () => resolve());
+			const timer = setTimeout(() => resolve(), client.connected ? 1000 : 50);
+			timer.unref?.();
+			client.end(false, {}, () => {
+				settled = true;
+				clearTimeout(timer);
+				resolve();
+			});
 		});
+		if (!settled) {
+			const stream = (client as unknown as { stream?: { destroy?: () => void } }).stream;
+			stream?.destroy?.();
+		}
 	}
 
 	/**
