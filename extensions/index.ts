@@ -27,7 +27,7 @@ import {
 import { readGitInfo } from "../src/git.ts";
 import { MqttLink, type LogFn } from "../src/mqtt.ts";
 import { loadOrCreateIdentity } from "../src/identity.ts";
-import { Orchestrator, type TaskRecord } from "../src/orchestrator.ts";
+import { Orchestrator, PING_TIMEOUT_MS, type TaskRecord } from "../src/orchestrator.ts";
 import { Presence, buildPresence, probePresence, type PresenceIdentity } from "../src/presence.ts";
 import {
 	formatPairingCode,
@@ -51,7 +51,8 @@ const TOOL_DISPATCH = "dispatch_task";
 const TOOL_RESULT = "get_result";
 const TOOL_CANCEL = "cancel_task";
 const TOOL_LIST_TASKS = "list_tasks";
-const ORCHESTRATOR_TOOLS = [TOOL_LIST_WORKERS, TOOL_DISPATCH, TOOL_RESULT, TOOL_CANCEL, TOOL_LIST_TASKS];
+const TOOL_PING = "ping_worker";
+const ORCHESTRATOR_TOOLS = [TOOL_LIST_WORKERS, TOOL_DISPATCH, TOOL_RESULT, TOOL_CANCEL, TOOL_LIST_TASKS, TOOL_PING];
 
 /** Explicit so all three dispatch_task returns share one details type. */
 interface DispatchDetails {
@@ -59,6 +60,18 @@ interface DispatchDetails {
 	state?: string;
 	worker?: string;
 	error?: string;
+}
+
+/** Explicit so both ping_worker returns share one details type. */
+interface PingDetails {
+	worker: string;
+	answered: boolean;
+	error?: string;
+	ageMs?: number;
+	rttMs?: number;
+	state?: string;
+	activeTaskId?: string;
+	heartbeatLagMs?: number;
 }
 
 const LOG_LIMIT = 100;
@@ -684,11 +697,35 @@ function resolveSessionId(pi: ExtensionAPI, config: AppConfig): string | undefin
  * arguments, so this stacks a small wrapper that only reacts to a partial subcommand and
  * otherwise defers to it.
  */
+/**
+ * Worker ids to offer as `/mqtt <sub> <worker>` arguments, from whatever the session
+ * knows: the roster for `ping`, pending offers for `admit`, the room's approvals for
+ * `revoke`. Empty when no orchestrator runtime exists, in which case nothing is offered.
+ */
+function completionWorkers(subcommand: string): Array<{ id: string; description?: string }> {
+	const orchestrator = runtime?.orchestrator;
+	if (!orchestrator) return [];
+	if (subcommand === "admit") {
+		return orchestrator
+			.pairingOffers()
+			.map((offer) => ({ id: offer.workerId, description: `pending · code ${formatPairingCode(offer.code)}` }));
+	}
+	if (subcommand === "revoke") {
+		return orchestrator
+			.trustedWorkers()
+			.map((worker) => ({ id: worker.workerId, description: `approved by ${worker.admittedBy}` }));
+	}
+	return orchestrator.entries().map((entry) => ({
+		id: entry.presence.workerId,
+		description: `${entry.stale ? "no heartbeat" : entry.presence.state}${entry.presence.activeTaskId ? ` · ${entry.presence.activeTaskId}` : ""}`,
+	}));
+}
+
 function withSubcommandCompletion(current: AutocompleteProvider): AutocompleteProvider {
 	return {
 		async getSuggestions(lines, cursorLine, cursorCol, options) {
 			const text = (lines[cursorLine] ?? "").slice(0, cursorCol);
-			const suggestion = subcommandSuggestions(text);
+			const suggestion = subcommandSuggestions(text, { workers: completionWorkers });
 			if (suggestion) {
 				return { items: suggestion.items as AutocompleteItem[], prefix: suggestion.prefix };
 			}
@@ -931,12 +968,12 @@ export default function (pi: ExtensionAPI) {
 					...(params.model ? { model: params.model } : {}),
 					...(params.repo ? { repo: params.repo } : {}),
 				});
-			let outcome = send();
+			let outcome = await send();
 			// A worker that just connected may not have its retained presence delivered yet;
 			// give that race a moment before reporting it as unknown.
 			if (!outcome.ok && outcome.error.startsWith("unknown worker")) {
 				await new Promise((resolve) => setTimeout(resolve, 1200));
-				outcome = send();
+				outcome = await send();
 			}
 			if (!outcome.ok) {
 				return {
@@ -1048,6 +1085,58 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
+	pi.registerTool({
+		name: TOOL_PING,
+		label: "Ping worker",
+		description:
+			"Ask one worker whether it is answering right now, and time the round trip. Distinguishes a worker whose heartbeat is late (timers throttled) from one that is wedged: a fresh heartbeat with no pong means the process is not running.",
+		parameters: Type.Object({
+			worker: Type.String({ description: "Worker id from list_workers" }),
+			timeoutMs: Type.Optional(Type.Number({ description: "How long to wait for the answer. Default 5000ms." })),
+		}),
+		defaultActive: false,
+		async execute(_toolCallId, params) {
+			const current = runtime;
+			if (!current?.orchestrator) {
+				return { content: [{ type: "text", text: inactiveReason() }], details: undefined };
+			}
+			const result = await current.orchestrator.ping(params.worker, params.timeoutMs ?? PING_TIMEOUT_MS);
+			const entry = current.orchestrator.entries().find((item) => item.presence.workerId === params.worker);
+			const age = entry ? `last heartbeat ${Math.round(entry.ageMs / 1000)}s ago` : "not in the roster";
+			if (!result.ok) {
+				const failed: PingDetails = { worker: params.worker, answered: false, error: result.error, ageMs: entry?.ageMs };
+				return {
+					content: [
+						{
+							type: "text",
+							text: `${params.worker}: no answer (${result.error}); ${age}. It may be wedged — check the box, or /mqtt workers.`,
+						},
+					],
+					details: failed,
+					isError: true,
+				};
+			}
+			const lag = typeof result.heartbeatLagMs === "number" && result.heartbeatLagMs > 1000 ? `, its heartbeat ran ${Math.round(result.heartbeatLagMs / 1000)}s late` : "";
+			const answered: PingDetails = {
+				worker: params.worker,
+				answered: true,
+				rttMs: result.rttMs,
+				state: result.state,
+				...(result.activeTaskId ? { activeTaskId: result.activeTaskId } : {}),
+				...(typeof result.heartbeatLagMs === "number" ? { heartbeatLagMs: result.heartbeatLagMs } : {}),
+			};
+			return {
+				content: [
+					{
+						type: "text",
+						text: `${params.worker}: answered in ${result.rttMs}ms — ${result.state}${result.activeTaskId ? ` (${result.activeTaskId})` : ""}${lag}`,
+					},
+				],
+				details: answered,
+			};
+		},
+	});
+
 	pi.registerCommand("mqtt", {
 		description:
 			"pi-mqtt: /mqtt status, workers, tasks, connect, disconnect, kick",
@@ -1136,6 +1225,25 @@ export default function (pi: ExtensionAPI) {
 				);
 				return;
 			}
+			if (arg.startsWith("ping")) {
+				if (!runtime?.orchestrator) {
+					ctx.ui.notify("pi-mqtt: only an orchestrator can ping workers.", "info");
+					return;
+				}
+				const workerId = raw.split(/\s+/)[1];
+				if (!workerId) {
+					ctx.ui.notify("usage: /mqtt ping <worker>", "warning");
+					return;
+				}
+				const answered = await runtime.orchestrator.ping(workerId);
+				ctx.ui.notify(
+					answered.ok
+						? `pi-mqtt: ${workerId} answered in ${answered.rttMs}ms (${answered.state}${answered.activeTaskId ? `, ${answered.activeTaskId}` : ""})`
+						: `pi-mqtt: ${workerId} did not answer — ${answered.error}`,
+					answered.ok ? "info" : "warning",
+				);
+				return;
+			}
 			if (arg.startsWith("kick")) {
 				if (!runtime) {
 					ctx.ui.notify("pi-mqtt is not connected.", "info");
@@ -1215,7 +1323,7 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 			if (arg) {
-				ctx.ui.notify("usage: /mqtt [status|workers|tasks|pending|admit|revoke|trusted|connect|disconnect|kick]", "warning");
+				ctx.ui.notify("usage: /mqtt [status|workers|tasks|ping|pending|admit|revoke|trusted|connect|disconnect|kick]", "warning");
 				return;
 			}
 

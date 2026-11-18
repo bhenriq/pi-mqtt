@@ -41,6 +41,32 @@ export interface TaskMessage {
 	createdAt: number;
 }
 
+/**
+ * A liveness question, and its answer.
+ *
+ * Presence is a self-report on a timer; a probe is a round trip to the worker's message
+ * handler. The pair distinguishes "timers are late" (heartbeat stale, probe answered)
+ * from "wedged but recently heartbeating" (heartbeat fresh, probe unanswered).
+ */
+export interface ProbeMessage {
+	v: number;
+	kind: "probe";
+	probeId: string;
+	at: number;
+}
+
+export interface PongMessage {
+	v: number;
+	kind: "pong";
+	probeId: string;
+	workerId: string;
+	state: WorkerState;
+	activeTaskId?: string;
+	/** How late this worker's own heartbeat timer has been firing. */
+	heartbeatLagMs?: number;
+	at: number;
+}
+
 /** Room-wide eviction: every session in the room disconnects itself. */
 export interface KickMessage {
 	v: number;
@@ -58,7 +84,7 @@ export interface CancelMessage {
 	reason?: string;
 }
 
-export type ControlMessage = TaskMessage | CancelMessage | KickMessage;
+export type ControlMessage = TaskMessage | CancelMessage | KickMessage | ProbeMessage;
 
 /** Published as soon as a worker actually begins a task. */
 export interface AckMessage {
@@ -318,7 +344,26 @@ export function isKickMessage(value: Json): value is Json & KickMessage {
 }
 
 export function isControlMessage(value: Json): value is Json & ControlMessage {
-	return isTaskMessage(value) || isCancelMessage(value) || isKickMessage(value);
+	return isTaskMessage(value) || isCancelMessage(value) || isKickMessage(value) || isProbeMessage(value);
+}
+
+export function isProbeMessage(value: Json): value is Json & ProbeMessage {
+	return hasEnvelope(value, "probe") && isStr(value.probeId) && isNum(value.at);
+}
+
+export function isPongMessage(value: Json): value is Json & PongMessage {
+	return (
+		hasEnvelope(value, "pong") &&
+		isStr(value.probeId) &&
+		isStr(value.workerId) &&
+		isStr(value.state) &&
+		["idle", "busy", "offline", "pending"].includes(value.state) &&
+		isNum(value.at)
+	);
+}
+
+export function newProbeId(): string {
+	return `p_${Date.now().toString(36)}_${crypto.randomUUID().slice(0, 6)}`;
 }
 
 export function isPairMessage(value: Json): value is Json & PairMessage {

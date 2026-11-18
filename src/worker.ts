@@ -17,6 +17,7 @@ import {
 	isCancelMessage,
 	isControlMessage,
 	isKickMessage,
+	isProbeMessage,
 	taskPromptFrame,
 	type ResultMessage,
 	type TaskMessage,
@@ -74,6 +75,10 @@ export class Worker {
 				}
 				if (isKickMessage(payload)) {
 					// Room-wide kicks arrive on the room control topic, not here.
+					return;
+				}
+				if (isProbeMessage(payload)) {
+					this.answerProbe(payload.probeId);
 					return;
 				}
 				if (isCancelMessage(payload)) this.handleCancel(payload.taskId);
@@ -227,6 +232,29 @@ export class Worker {
 
 		this.publishResult({ task: active.task, status, error, startedAt: active.startedAt, text: active.text, costUsd: active.costUsd, baseSha: active.baseSha, branch: active.branch });
 		this.deps.presence.update({ state: "idle", activeTaskId: undefined, startedAt: undefined });
+	}
+
+	// --- liveness --------------------------------------------------------
+
+	/**
+	 * Answer a probe, from whatever state the worker is in.
+	 *
+	 * Deliberately answered even mid-task: "busy and answering" and "busy and hung" look
+	 * identical from the outside otherwise, and the difference is what a prober asks about.
+	 */
+	private answerProbe(probeId: string): void {
+		void this.link
+			.publish(this.topics.ack(this.deps.config.worker.workerId), {
+				v: 1,
+				kind: "pong",
+				probeId,
+				workerId: this.deps.config.worker.workerId,
+				state: this.deps.presence.state,
+				...(this.active ? { activeTaskId: this.active.task.taskId } : {}),
+				heartbeatLagMs: this.deps.presence.heartbeatLagMs,
+				at: Date.now(),
+			})
+			.catch((error: unknown) => this.deps.log("warn", `pong failed: ${(error as Error).message}`));
 	}
 
 	// --- publishing ------------------------------------------------------

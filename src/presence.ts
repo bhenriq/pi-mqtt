@@ -97,6 +97,10 @@ export class Presence {
 	private publishing = false;
 	/** Whether the current streak of failed publishes has already been reported. */
 	private failing = false;
+	/** When the next heartbeat was due, so the delay can be reported to a prober. */
+	private nextBeatDueAt = 0;
+	/** How late the last heartbeat fired. A throttled process shows this. */
+	private lastLagMs = 0;
 
 	constructor(
 		private readonly link: MqttLink,
@@ -130,8 +134,24 @@ export class Presence {
 
 	start(): void {
 		if (!this.announced) void this.publish(HEARTBEAT_TIMEOUT_MS);
-		this.timer = setInterval(() => void this.publish(HEARTBEAT_TIMEOUT_MS), this.heartbeatMs);
+		this.nextBeatDueAt = Date.now() + this.heartbeatMs;
+		this.timer = setInterval(() => {
+			const now = Date.now();
+			this.lastLagMs = Math.max(0, now - this.nextBeatDueAt);
+			this.nextBeatDueAt = now + this.heartbeatMs;
+			void this.publish(HEARTBEAT_TIMEOUT_MS);
+		}, this.heartbeatMs);
 		this.timer.unref?.();
+	}
+
+	/** How late the heartbeat timer ran, in ms. Evidence that the process was busy. */
+	get heartbeatLagMs(): number {
+		return this.lastLagMs;
+	}
+
+	/** The task this presence advertises, if any. */
+	get activeTaskId(): string | undefined {
+		return this.current.activeTaskId;
 	}
 
 	/**

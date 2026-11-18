@@ -13,10 +13,12 @@ import {
 	formatPairingCode,
 	isAckMessage,
 	isAdmissionMessage,
+	isPongMessage,
 	isPairMessage,
 	isPresenceMessage,
 	isResultMessage,
 	joinStatement,
+	newProbeId,
 	newTaskId,
 	pairingCode,
 	type PairMessage,
@@ -26,6 +28,7 @@ import {
 	type TaskMessage,
 	type TaskStatus,
 	type Topics,
+	type WorkerState,
 } from "./protocol.ts";
 import type { AdmissionMessage } from "./protocol.ts";
 import { readLegacyApprovals } from "./trusted.ts";
@@ -111,6 +114,21 @@ export interface PairingOffer {
 }
 
 const DEFAULT_PAIRING_TTL_MS = 10 * 60 * 1000;
+/** How long to wait for a pong before calling a worker unresponsive. */
+export const PING_TIMEOUT_MS = 5000;
+/** A ping answered this recently is better evidence than a heartbeat age. */
+export const PING_GRACE_FACTOR = 3;
+
+export type ProbeResult =
+	| { ok: true; rttMs: number; state: WorkerState; activeTaskId?: string; heartbeatLagMs?: number }
+	| { ok: false; error: string };
+
+/** The last answer a worker gave to a probe, for the roster. */
+export interface ProbeRecord {
+	at: number;
+	answered: boolean;
+	rttMs?: number;
+}
 
 function clip(value: string, width: number): string {
 	const flat = value.replace(/\s+/g, " ");
@@ -133,6 +151,13 @@ export class Orchestrator {
 	private readonly autoAdmitted = new Set<string>();
 	/** Delayed one-time migration of the pre-room-scoped approval file. */
 	private migrationTimer: NodeJS.Timeout | undefined;
+	/** Probes in flight, by probe id. */
+	private readonly pendingProbes = new Map<
+		string,
+		{ workerId: string; at: number; timer: NodeJS.Timeout; resolve: (result: ProbeResult) => void }
+	>();
+	/** Last probe result per worker, so `entries()` can trust an answer over an age. */
+	private readonly probes = new Map<string, ProbeRecord>();
 	private readonly orchestrators = new Map<string, PresenceMessage>();
 	private readonly tasks = new Map<string, TaskRecord>();
 	private readonly unsubscribes: Array<() => void> = [];
@@ -184,6 +209,10 @@ export class Orchestrator {
 				this.orchestrators.set(payload.workerId, payload);
 			}),
 			this.link.subscribe(this.topics.ackFilter, (_topic, payload) => {
+				if (payload !== undefined && isPongMessage(payload)) {
+					this.settleProbe(payload);
+					return;
+				}
 				if (payload === undefined || !isAckMessage(payload)) return;
 				const record = this.tasks.get(payload.taskId);
 				if (!record) return;
@@ -219,6 +248,8 @@ export class Orchestrator {
 
 	stop(): void {
 		if (this.migrationTimer) clearTimeout(this.migrationTimer);
+		for (const pending of this.pendingProbes.values()) clearTimeout(pending.timer);
+		this.pendingProbes.clear();
 		for (const unsubscribe of this.unsubscribes) unsubscribe();
 		this.unsubscribes.length = 0;
 		for (const timer of this.ackTimers.values()) clearTimeout(timer);
@@ -231,12 +262,16 @@ export class Orchestrator {
 		return [...this.workers.values()]
 			.map((presence) => {
 				const ageMs = now - presence.updatedAt;
-				return { presence, ageMs, stale: presence.state !== "offline" && ageMs > staleAfter };
+				// Someone answering a probe is alive whatever its heartbeat timer thinks: that
+				// is exactly the "throttled process" case this exists for.
+				const probe = this.probes.get(presence.workerId);
+				const verified = probe?.answered === true && now - probe.at < staleAfter * PING_GRACE_FACTOR;
+				return { presence, ageMs, stale: presence.state !== "offline" && ageMs > staleAfter && !verified };
 			})
 			.sort((a, b) => a.presence.workerId.localeCompare(b.presence.workerId));
 	}
 
-	dispatch(params: DispatchParams): DispatchOutcome {
+	async dispatch(params: DispatchParams): Promise<DispatchOutcome> {
 		// A dead link makes every entry in the roster look stale: say that plainly
 		// instead of blaming a worker that may be heartbeating perfectly well.
 		if (!this.link.online) {
@@ -264,7 +299,20 @@ export class Orchestrator {
 			};
 		}
 		if (entry.stale) {
-			return { ok: false, error: `worker "${params.to}" is stale (last heartbeat ${Math.round(entry.ageMs / 1000)}s ago)` };
+			// Before writing it off: a worker whose timers are late still answers. One round
+			// trip is cheaper than a false "offline", and it is the only way to tell a
+			// throttled process from a wedged one.
+			const answer = await this.ping(params.to, PING_TIMEOUT_MS);
+			if (!answer.ok) {
+				return {
+					ok: false,
+					error: `worker "${params.to}" did not answer a ping (last heartbeat ${Math.round(entry.ageMs / 1000)}s ago): ${answer.error}`,
+				};
+			}
+			const refreshed = this.entries().find((item) => item.presence.workerId === params.to) ?? entry;
+			if (refreshed.stale) {
+				return { ok: false, error: `worker "${params.to}" is stale (last heartbeat ${Math.round(refreshed.ageMs / 1000)}s ago)` };
+			}
 		}
 		if (entry.presence.state === "offline") {
 			return { ok: false, error: `worker "${params.to}" is offline` };
@@ -400,6 +448,7 @@ export class Orchestrator {
 			["REPO", 26],
 			["MODEL", 22],
 			["AGE", 5],
+			["PONG", 10],
 			["CWD", 3],
 		]
 			.map(([label, width]) => String(label).padEnd(Number(width)))
@@ -413,6 +462,7 @@ export class Orchestrator {
 				clip([presence.repo, presence.branch].filter(Boolean).join("@") || "-", 26),
 				clip(presence.model ?? "-", 22),
 				clip(formatAge(ageMs), 5),
+				clip(this.pongLabel(presence.workerId), 10),
 				presence.cwd,
 			].join("  "),
 		);
@@ -424,6 +474,7 @@ export class Orchestrator {
 				clip([presence.repo, presence.branch].filter(Boolean).join("@") || "-", 26),
 				clip(presence.model ?? "-", 22),
 				clip(formatAge(ageMs), 5),
+				clip("-", 10),
 				presence.cwd,
 			].join("  "),
 		);
@@ -645,6 +696,64 @@ export class Orchestrator {
 		void this.link
 			.publish(this.topics.pair(workerId), message)
 			.catch((error: unknown) => this.options.log("error", `pairing message failed: ${(error as Error).message}`));
+	}
+
+	/**
+	 * Ask a worker whether it is answering, and time the answer.
+	 *
+	 * Goes out on the worker's control topic and comes back on its ack topic, so it needs
+	 * no new topics or ACL entries and works while the worker is busy. A worker that is
+	 * `pending` is not subscribed and will not answer — that is a truthful "not accepting
+	 * work", not a fault.
+	 */
+	ping(workerId: string, timeoutMs = PING_TIMEOUT_MS): Promise<ProbeResult> {
+		if (!this.link.online) return Promise.resolve({ ok: false, error: "not connected to the broker" });
+		const probeId = newProbeId();
+		const sentAt = Date.now();
+		return new Promise<ProbeResult>((resolve) => {
+			const timer = setTimeout(() => {
+				this.pendingProbes.delete(probeId);
+				this.probes.set(workerId, { at: Date.now(), answered: false });
+				resolve({ ok: false, error: `no answer in ${timeoutMs}ms` });
+			}, timeoutMs);
+			timer.unref?.();
+			this.pendingProbes.set(probeId, { workerId, at: sentAt, timer, resolve });
+			void this.link
+				.publish(this.topics.control(workerId), { v: 1, kind: "probe", probeId, at: sentAt })
+				.catch((error: unknown) => {
+					clearTimeout(timer);
+					this.pendingProbes.delete(probeId);
+					resolve({ ok: false, error: `probe failed: ${(error as Error).message}` });
+				});
+		});
+	}
+
+	/** The last probe result for a worker, for the roster. */
+	lastProbe(workerId: string): ProbeRecord | undefined {
+		return this.probes.get(workerId);
+	}
+
+	/** One column's worth of "did it answer, and how fast". */
+	private pongLabel(workerId: string): string {
+		const probe = this.probes.get(workerId);
+		if (!probe) return "-";
+		return probe.answered ? `${probe.rttMs ?? 0}ms` : "no answer";
+	}
+
+	private settleProbe(pong: { probeId: string; workerId: string; state: WorkerState; activeTaskId?: string; heartbeatLagMs?: number }): void {
+		const pending = this.pendingProbes.get(pong.probeId);
+		if (!pending || pending.workerId !== pong.workerId) return;
+		clearTimeout(pending.timer);
+		this.pendingProbes.delete(pong.probeId);
+		const rttMs = Date.now() - pending.at;
+		this.probes.set(pong.workerId, { at: Date.now(), answered: true, rttMs });
+		pending.resolve({
+			ok: true,
+			rttMs,
+			state: pong.state,
+			...(pong.activeTaskId ? { activeTaskId: pong.activeTaskId } : {}),
+			...(typeof pong.heartbeatLagMs === "number" ? { heartbeatLagMs: pong.heartbeatLagMs } : {}),
+		});
 	}
 
 	// --- internals -------------------------------------------------------

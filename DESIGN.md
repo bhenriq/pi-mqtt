@@ -154,6 +154,7 @@ misconfigured session inert rather than quietly connected to the wrong broker.
 |---|---|
 | Target busy | `dispatch_task` → `busy`; caller may use `ifBusy: "wait"` |
 | Target offline | instant error from retained presence / LWT |
+| Target looks stale | one `probe` before refusing: a throttled worker answers, a wedged one does not |
 | No `started` ack within ~5s | safe auto-redispatch (provably no side effects) |
 | Worker dies mid-task | `lost`; **manual** re-dispatch, never automatic |
 | Timeout | worker-enforced abort, `timeout` + partial text |

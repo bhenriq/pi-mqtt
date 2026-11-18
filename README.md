@@ -153,6 +153,7 @@ Orchestrator tools (active only in an orchestrator session):
 | `get_result` | Full result for a task id: final text, diffstat, patch path, worker session file |
 | `list_tasks` | Task states: queued, sent, running, done, timeout, cancelled, lost |
 | `cancel_task` | Cooperative abort; the worker reports partial output |
+| `ping_worker` | One round trip: is this worker answering *now*, and how fast |
 
 ### A worker has to be let in
 
@@ -191,7 +192,7 @@ Typing `/mqtt ` offers the subcommands as completions (`/mqtt con` → `connect`
 a small provider on the editor's built-in one.
 
 Commands: `/mqtt status` (configuration and local state), `/mqtt workers` (the roster),
-`/mqtt tasks` (dispatched tasks), `/mqtt pending` / `/mqtt admit` / `/mqtt revoke` /
+`/mqtt tasks` (dispatched tasks), `/mqtt ping` (is it answering), `/mqtt pending` / `/mqtt admit` / `/mqtt revoke` /
 `/mqtt trusted` (worker approval), `/mqtt connect` / `/mqtt disconnect`, and `/mqtt kick`.
 Bare `/mqtt` is `status` plus recent log lines.
 
