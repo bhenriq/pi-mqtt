@@ -155,6 +155,13 @@ Orchestrator tools (active only in an orchestrator session):
 | `cancel_task` | Cooperative abort; the worker reports partial output |
 | `ping_worker` | One round trip: is this worker answering *now*, and how fast |
 
+A worker's heartbeat is a self-report on a timer, so it cannot distinguish a throttled process
+from a wedged one. A probe can: it is answered from any state, including mid-task. Workers advertise
+what they understand in presence (`capabilities`, today `["probe"]`), so probing a client older than
+probes reports "that worker is an older client" immediately instead of a five-second silence — and a
+failed probe is weighed against task traffic, because a worker that acked or reported within 30 s is
+alive whatever a probe says.
+
 ### A worker has to be let in
 
 A worker joins as `pending` and cannot be dispatched to until an orchestrator approves
