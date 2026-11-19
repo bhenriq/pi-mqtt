@@ -224,6 +224,7 @@ export class Presence {
 	private async publish(waitMs = HEARTBEAT_TIMEOUT_MS): Promise<void> {
 		if (this.stopped || this.publishing || !this.link.online) return;
 		this.publishing = true;
+		const startedAt = Date.now();
 		try {
 			await this.link.publish(
 				this.topic,
@@ -237,6 +238,15 @@ export class Presence {
 				this.log("info", "presence is being delivered again");
 			}
 		} catch (error) {
+			// A rejection that arrives long after the timeout is not a slow broker: it is a
+			// late timer, i.e. this process was not running for a while (macOS defers timers
+			// for backgrounded apps). Treating that as a dead socket is how a throttled laptop
+			// ends up recycling a perfectly good connection once a minute.
+			const late = Date.now() - startedAt > waitMs + 750;
+			if (late) {
+				this.log("info", `heartbeat rejected late (${Date.now() - startedAt}ms); the event loop was stalled, not the link`);
+				return;
+			}
 			// A heartbeat that the broker did not acknowledge is one symptom of a link that
 			// is already reporting itself; a warning per beat is noise on top of noise, and
 			// the link shares one notification window with us.

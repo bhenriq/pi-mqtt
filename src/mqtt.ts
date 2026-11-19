@@ -62,6 +62,8 @@ export class MqttLink {
 	private readonly recentDrops: number[] = [];
 	/** Last time connection trouble was worth a notification. */
 	private lastTroubleAt = 0;
+	/** True while a close is one we asked for, so it is not reported as a loss. */
+	private recycling = false;
 	/** Own retry loop: mqtt.js's fixed period cannot back off, so it is disabled. */
 	private reconnectTimer: NodeJS.Timeout | undefined;
 	private reconnectAttempts = 0;
@@ -149,6 +151,19 @@ export class MqttLink {
 			if (!this.closeInfo) this.closeInfo = { at: Date.now(), source: "socket" };
 			const info = this.closeInfo;
 			const detail = `${info.source}${info.code !== undefined ? " " + describeCloseCode(info.code) : ""}${info.reason ? `, ${info.reason}` : ""}`;
+			if (this.recycling) {
+				// We dropped it ourselves to repair a socket that was passing nothing. Counting
+				// that as a lost connection is how a repair becomes an alarm.
+				this.recycling = false;
+				if (this.offlineSince === undefined) {
+					this.reconnectCount += 1;
+					this.offlineSince = Date.now();
+					this.noteDrop();
+				}
+				this.options.log("info", `mqtt closed the connection on purpose (${detail})`);
+				this.scheduleReconnect();
+				return;
+			}
 			// One warning per outage: everything after it is a retry, and the retries belong
 			// in the log ring (bare /mqtt), not in the notification area where they would
 			// march past a user who can do nothing about them.
@@ -404,6 +419,7 @@ export class MqttLink {
 		if (this.closed || this.takenOver || !client) return;
 		if (this.offlineSince !== undefined) return; // already reconnecting
 		this.options.log("info", `mqtt recycling the connection (${reason})`);
+		this.recycling = true;
 		const stream = (client as unknown as { stream?: { destroy?: () => void } }).stream;
 		stream?.destroy?.();
 	}
