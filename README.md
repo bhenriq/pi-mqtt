@@ -223,12 +223,16 @@ a tool that is no longer registered, so without that line it reads its own older
 and reports a worker as offline from a roster that stopped updating before the disconnect.
 `/mqtt status` reports `drops: N (last <time>: <source> <code>)` once a connection has been lost,
 which distinguishes a normal close (`1000`) from an abnormal one (`1006`, no close frame — usually
-an intermediary or a sleeping machine). `keepaliveSec` defaults to 15, so a dead socket is noticed
-in about 22s.
+an intermediary or a sleeping machine). `keepaliveSec` defaults to 60, so a dead socket is noticed by
+the broker in about 90s — deliberately slow, because a backgrounded process can have its timers
+deferred for tens of seconds and a short keepalive turns that into a dropped connection. Quick
+detection is the heartbeat's job: two unacknowledged heartbeats recycle the socket on purpose, and
+`ping` answers "is it answering" on demand.
 
 Retries start at `reconnectMs` (2s) and double to a 30s ceiling, so a broker that is unreachable —
 DNS failure, deploy in progress, laptop off the network — costs two attempts a minute instead of
-one every 2s. Sound follows the same rule: **one warning per incident**, not per attempt. A link that
+one every 2s. Sound follows the same rule: **one warning per incident**, not per attempt (the link and the
+heartbeat share one minute-long window, so a flap is one line however many detectors notice it). A link that
 keeps dropping gets one warning a minute and is counted at info; a heartbeat the broker did not
 acknowledge warns once and then stays quiet until it is delivered again; and when the link already
 knows it is down, the heartbeat says nothing at all. Quitting never waits on a socket that is not

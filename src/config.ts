@@ -316,7 +316,10 @@ export function loadConfig(options: LoadOptions): LoadResult {
 				password: token ?? tidy(env.PI_MQTT_PASSWORD) ?? tidy(file?.mqtt?.password),
 				cluster,
 				protocolVersion: rawVersion,
-				keepaliveSec: broker?.keepaliveSec ?? file?.mqtt?.keepaliveSec ?? 15,
+				// 60 rather than 15: a backgrounded process can have its timers deferred for tens of
+				// seconds, and a keepalive that short turns that into a dropped connection. Detecting
+				// a dead socket quickly is the heartbeat's job (and `ping`), not the ping deadline's.
+				keepaliveSec: broker?.keepaliveSec ?? file?.mqtt?.keepaliveSec ?? 60,
 				reconnectMs: broker?.reconnectMs ?? file?.mqtt?.reconnectMs ?? 2000,
 				// Env overrides exist so a launcher can point at a TLS broker without
 				// writing a config file.

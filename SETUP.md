@@ -101,6 +101,7 @@ stops. There is no id override: the id is always `<name>_<pi session name>`.
 | `role` | `worker` or `orchestrator`. Without it (here, in `PI_MQTT_ROLE`, or via `--pi-mqtt-role`) the extension stays inert |
 | `name` | This machine's name: the base for the session id. Defaults to the hostname |
 
+| `mqtt.keepaliveSec` | Seconds between MQTT pings; default 60. Raise it on a laptop whose background timers get deferred, lower it only if you need the broker to notice a dead socket quickly |
 | `broker.url` | The scheme picks the transport: `wss://` (TLS WebSocket, usual for a hosted broker), `mqtts://` (TLS on a raw port), `mqtt://`/`ws://` (plain, local only) |
 | `room.name` | The room — also the topic prefix. Everyone who should see each other must share it |
 | `room.password` | Room password for the legacy single-`cluster`-user broker. With role-scoped credentials, set `mqtt.username`/`mqtt.password` instead |

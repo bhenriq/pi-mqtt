@@ -99,6 +99,8 @@ export class Presence {
 	private publishing = false;
 	/** Whether the current streak of failed publishes has already been reported. */
 	private failing = false;
+	/** Heartbeats that failed in a row; two is enough to declare the socket wedged. */
+	private consecutiveFailures = 0;
 	/** When the next heartbeat was due, so the delay can be reported to a prober. */
 	private nextBeatDueAt = 0;
 	/** How late the last heartbeat fired. A throttled process shows this. */
@@ -231,16 +233,24 @@ export class Presence {
 			);
 			if (this.failing) {
 				this.failing = false;
+				this.consecutiveFailures = 0;
 				this.log("info", "presence is being delivered again");
 			}
 		} catch (error) {
 			// A heartbeat that the broker did not acknowledge is one symptom of a link that
-			// is already reporting itself; a warning per beat is noise on top of noise.
-			if (this.failing) this.log("info", `presence publish failed again: ${(error as Error).message}`);
-			else {
+			// is already reporting itself; a warning per beat is noise on top of noise, and
+			// the link shares one notification window with us.
+			this.consecutiveFailures += 1;
+			const message = `presence is not being delivered: ${(error as Error).message}`;
+			if (!this.failing) {
 				this.failing = true;
-				this.log("warn", `presence is not being delivered: ${(error as Error).message}`);
+				this.link.reportTrouble(message);
+			} else {
+				this.log("info", `presence publish failed again: ${(error as Error).message}`);
 			}
+			// Two beats with nothing acknowledged: the socket is passing nothing, whatever
+			// the keepalive deadline thinks. Recycle it rather than wait to be told.
+			if (this.consecutiveFailures === 2) this.link.recycle("heartbeat not acknowledged");
 		} finally {
 			this.publishing = false;
 		}

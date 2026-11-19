@@ -14,6 +14,8 @@ const PUBLISH_TIMEOUT_MS = 4000;
 const MAX_RECONNECT_MS = 30_000;
 /** Drops closer together than this are one incident, not one notification each. */
 const FLAP_WINDOW_MS = 60_000;
+/** One notification per window across link *and* heartbeat, whoever notices first. */
+const TROUBLE_WINDOW_MS = 60_000;
 
 export interface PublishOptions {
 	retain?: boolean;
@@ -58,6 +60,8 @@ export class MqttLink {
 	private reconnectCount = 0;
 	/** Recent drops, to tell a long outage from a connection that keeps flapping. */
 	private readonly recentDrops: number[] = [];
+	/** Last time connection trouble was worth a notification. */
+	private lastTroubleAt = 0;
 	/** Own retry loop: mqtt.js's fixed period cannot back off, so it is disabled. */
 	private reconnectTimer: NodeJS.Timeout | undefined;
 	private reconnectAttempts = 0;
@@ -154,13 +158,9 @@ export class MqttLink {
 				// One notification a minute, however often the socket dies: a flapping link
 				// otherwise resets the backoff each time it reconnects and turns into a
 				// notification every few seconds.
-				const now = Date.now();
-				this.recentDrops.push(now);
-				while (this.recentDrops.length > 0 && now - (this.recentDrops[0] ?? now) > FLAP_WINDOW_MS) {
-					this.recentDrops.shift();
-				}
-				if (this.recentDrops.length === 1) options.log("warn", `mqtt connection lost (${detail}); retrying in the background`);
-				else options.log("info", `mqtt connection lost again (${detail}); ${this.recentDrops.length} drops in the last minute`);
+				const drops = this.noteDrop();
+				if (drops === 1) this.reportTrouble(`mqtt connection lost (${detail}); retrying in the background`);
+				else options.log("info", `mqtt connection lost again (${detail}); ${drops} drops in the last minute`);
 			} else {
 				options.log("info", `mqtt still offline (${detail})`);
 			}
@@ -373,6 +373,49 @@ export class MqttLink {
 			const stream = (client as unknown as { stream?: { destroy?: () => void } }).stream;
 			stream?.destroy?.();
 		}
+	}
+
+	/**
+	 * Report connection trouble, at most once a window.
+	 *
+	 * The link and the heartbeat are two detectors for one condition; without a shared
+	 * window, a flapping connection produces a pair of notifications per flap and trains
+	 * the reader to ignore both.
+	 */
+	reportTrouble(message: string): void {
+		const now = Date.now();
+		if (now - this.lastTroubleAt < TROUBLE_WINDOW_MS) {
+			this.options.log("info", `still in trouble: ${message}`);
+			return;
+		}
+		this.lastTroubleAt = now;
+		this.options.log("warn", message);
+	}
+
+	/**
+	 * Drop the connection on purpose, so the close handler reconnects.
+	 *
+	 * The escape hatch for a socket that is alive at both ends and passing nothing: a
+	 * heartbeat that will not be acknowledged is a better signal than the keepalive
+	 * deadline, which a throttled process may not even reach.
+	 */
+	recycle(reason: string): void {
+		const client = this.client;
+		if (this.closed || this.takenOver || !client) return;
+		if (this.offlineSince !== undefined) return; // already reconnecting
+		this.options.log("info", `mqtt recycling the connection (${reason})`);
+		const stream = (client as unknown as { stream?: { destroy?: () => void } }).stream;
+		stream?.destroy?.();
+	}
+
+	/** Record a drop and return how many happened in the last minute. */
+	private noteDrop(): number {
+		const now = Date.now();
+		this.recentDrops.push(now);
+		while (this.recentDrops.length > 0 && now - (this.recentDrops[0] ?? now) > FLAP_WINDOW_MS) {
+			this.recentDrops.shift();
+		}
+		return this.recentDrops.length;
 	}
 
 	/**
