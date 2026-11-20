@@ -64,6 +64,8 @@ export class MqttLink {
 	private lastTroubleAt = 0;
 	/** True while a close is one we asked for, so it is not reported as a loss. */
 	private recycling = false;
+	/** When the current connection came up, for "up for …" in status. */
+	private connectedSince: number | undefined;
 	/** Own retry loop: mqtt.js's fixed period cannot back off, so it is disabled. */
 	private reconnectTimer: NodeJS.Timeout | undefined;
 	private reconnectAttempts = 0;
@@ -95,6 +97,16 @@ export class MqttLink {
 		return this.client?.connected ?? false;
 	}
 
+	/** How long the current connection has been up, if it is. */
+	get upForMs(): number | undefined {
+		return this.online && this.connectedSince !== undefined ? Date.now() - this.connectedSince : undefined;
+	}
+
+	/** How long it has been offline, if it is. */
+	get downForMs(): number | undefined {
+		return this.offlineSince === undefined ? undefined : Date.now() - this.offlineSince;
+	}
+
 	connect(): Promise<void> {
 		const { config, options } = this;
 		const clientOptions: IClientOptions = {
@@ -124,8 +136,14 @@ export class MqttLink {
 		const client = connect(config.url, clientOptions);
 		this.client = client;
 
+		const reportSubscribeFailure = (filter: string, error: Error): void => {
+			const denied = (error as { code?: number }).code === 135 || /not authoriz/i.test(error.message);
+			if (denied) options.log("error", `subscribe ${filter} failed: ${error.message} — check the credential's ACL`);
+			else options.log("warn", `subscribe ${filter} failed: ${error.message}`);
+		};
 		client.on("connect", () => {
 			this.everConnected = true;
+			this.connectedSince = Date.now();
 			this.clearReconnectTimer();
 			const outage = this.offlineSince === undefined ? 0 : Date.now() - this.offlineSince;
 			const attempts = this.reconnectAttempts;
@@ -140,7 +158,7 @@ export class MqttLink {
 			this.trackStream(client);
 			for (const filter of this.handlers.keys()) {
 				client.subscribe(filter, { qos: 1 }, (error) => {
-					if (error) options.log("error", `subscribe ${filter} failed: ${error.message}`);
+					if (error) reportSubscribeFailure(filter, error);
 				});
 			}
 			options.onOnline?.();
@@ -158,6 +176,7 @@ export class MqttLink {
 				if (this.offlineSince === undefined) {
 					this.reconnectCount += 1;
 					this.offlineSince = Date.now();
+					this.connectedSince = undefined;
 					this.noteDrop();
 				}
 				this.options.log("info", `mqtt closed the connection on purpose (${detail})`);
@@ -170,6 +189,7 @@ export class MqttLink {
 			if (this.offlineSince === undefined) {
 				this.reconnectCount += 1;
 				this.offlineSince = Date.now();
+				this.connectedSince = undefined;
 				// One notification a minute, however often the socket dies: a flapping link
 				// otherwise resets the backoff each time it reconnects and turns into a
 				// notification every few seconds.
@@ -201,8 +221,9 @@ export class MqttLink {
 			// Before the first handshake the connect() rejection reports it once.
 			if (!this.everConnected || this.takenOver) return;
 			if (this.offlineSince === undefined) {
-				// A live connection reporting an error is news.
-				options.log("error", `mqtt error: ${error.message}`);
+				// A socket-level error is transport, not something the reader can act on: keep it
+				// in the log ring, where a link that flaps cannot bury anything important.
+				this.reportTrouble(`mqtt error: ${error.message}`);
 				return;
 			}
 			// While retrying, the same failure repeating is not news: log it when it changes.
@@ -266,7 +287,7 @@ export class MqttLink {
 			set = new Set();
 			this.handlers.set(filter, set);
 			this.client?.subscribe(filter, { qos: 1 }, (error) => {
-				if (error) this.options.log("error", `subscribe ${filter} failed: ${error.message}`);
+				if (error) this.options.log("warn", `subscribe ${filter} failed: ${error.message}`);
 			});
 		}
 		set.add(handler);

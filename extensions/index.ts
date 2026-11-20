@@ -99,6 +99,10 @@ interface Runtime {
 	pending: TaskRecord[];
 	/** Worker only: the code an orchestrator is waiting for us to confirm. */
 	pairing?: { code: string; orchestratorId: string; expiresAt: number };
+	/** Refreshes the footer, so the link's state is visible without notifications. */
+	footer?: NodeJS.Timeout;
+	/** True once we have complained about this outage. */
+	outageNotified?: boolean;
 	timer?: NodeJS.Timeout;
 }
 
@@ -140,12 +144,30 @@ let runtime: Runtime | undefined;
 let currentCtx: ExtensionContext | undefined;
 let logs: LogLine[] = [];
 
+/**
+ * Log every level, but only *errors* reach the transcript.
+ *
+ * Connection trouble is not news the reader can act on, and a laptop that naps produces it
+ * forever: it belongs in the footer (`mqtt down 2m, reconnecting`) and in the log ring that
+ * bare `/mqtt` prints, not in a stream of warnings over a working session. Errors stay,
+ * because those are the ones that need a decision — a refused credential, a wrong approval
+ * code, a session taken over.
+ */
 function makeLog(ctx: ExtensionContext): LogFn {
 	return (level, message) => {
 		logs.push({ at: Date.now(), level, message });
 		if (logs.length > LOG_LIMIT) logs = logs.slice(-LOG_LIMIT);
-		if (level !== "info") ctx.ui.notify(`pi-mqtt: ${message}`, level === "warn" ? "warning" : "error");
+		if (level === "error") ctx.ui.notify(`pi-mqtt: ${message}`, "error");
 	};
+}
+
+/** Short, human duration for the footer and status: 45s, 12m, 3h04m. */
+function formatDuration(ms: number): string {
+	const seconds = Math.round(ms / 1000);
+	if (seconds < 60) return `${seconds}s`;
+	const minutes = Math.floor(seconds / 60);
+	if (minutes < 60) return `${minutes}m`;
+	return `${Math.floor(minutes / 60)}h${String(minutes % 60).padStart(2, "0")}m`;
 }
 
 function describeModel(ctx: ExtensionContext): string | undefined {
@@ -536,6 +558,11 @@ async function connectRuntime(
 	});
 
 	runtime = connected;
+	// From here the footer carries the link's state, so connection trouble never has to
+	// interrupt the transcript.
+	connected.footer = setInterval(() => refreshFooter(), 15_000);
+	connected.footer.unref?.();
+	refreshFooter();
 	rememberJoin(config, config.worker.workerId);
 	ctx.ui.notify(`pi-mqtt ${config.role} "${config.worker.workerId}" connected to ${topics.base}`, "info");
 	return true;
@@ -554,6 +581,8 @@ async function disconnectRuntime(options: LeaveOptions = {}): Promise<void> {
 	const current = runtime;
 	runtime = undefined;
 	if (!current) return;
+	if (current.footer) clearInterval(current.footer);
+	currentCtx?.ui.setStatus("pi-mqtt", undefined);
 	if (current.timer) clearTimeout(current.timer);
 	current.orchestrator?.stop();
 	current.worker?.stop();
@@ -574,6 +603,48 @@ async function endSession(options: { reloading?: boolean } = {}): Promise<void> 
 	session = undefined;
 	sessionWorkerId = undefined;
 }
+
+/**
+ * Footer: the current link state, for the whole life of the session.
+ *
+ * This is the channel the user asked for: "keep the current status" instead of a
+ * notification per flap. It goes stale silently if the process is suspended, which is the
+ * truth, and the text is rebuilt from the link on every tick.
+ */
+function refreshFooter(): void {
+	const ctx = currentCtx;
+	const current = runtime;
+	if (!ctx) return;
+	if (!current) {
+		ctx.ui.setStatus("pi-mqtt", undefined);
+		return;
+	}
+	if (current.link.online) {
+		const up = current.link.upForMs;
+		const drops = current.link.reconnects;
+		current.outageNotified = false;
+		ctx.ui.setStatus(
+			"pi-mqtt",
+			`mqtt ${current.config.role} up${up === undefined ? "" : ` ${formatDuration(up)}`}${drops > 0 ? ` · ${drops} drop${drops === 1 ? "" : "s"}` : ""}`,
+		);
+		return;
+	}
+	const down = current.link.downForMs;
+	const since = down === undefined ? "" : ` ${formatDuration(down)}`;
+	ctx.ui.setStatus("pi-mqtt", `mqtt down${since} · reconnecting`);
+	// One interruption per outage, and only once it is long enough to matter: at that point
+	// work cannot be dispatched, which is something the reader has to know.
+	if (!current.outageNotified && down !== undefined && down > OUTAGE_NOTICE_MS) {
+		current.outageNotified = true;
+		ctx.ui.notify(
+			`pi-mqtt: offline for ${formatDuration(down)} — workers are unreachable until it reconnects (/mqtt status)`,
+			"warning",
+		);
+	}
+}
+
+/** How long an outage has to last before it earns one notification. */
+const OUTAGE_NOTICE_MS = 5 * 60 * 1000;
 
 /** Local state plus who else is on the broker, as far as this role can see. */
 function statusText(): string {
@@ -604,6 +675,13 @@ function statusText(): string {
 	const down = linkDownNotice(runtime.link);
 	if (down) lines.push(`state:   DOWN — ${down}; /mqtt disconnect then /mqtt connect to rejoin`);
 	else lines.push("state:   connected");
+	if (runtime.link.online) {
+		const up = runtime.link.upForMs;
+		lines.push(`link:    up${up === undefined ? "" : ` ${formatDuration(up)}`}`);
+	} else {
+		const down = runtime.link.downForMs;
+		lines.push(`link:    down${down === undefined ? "" : ` ${formatDuration(down)}`} — reconnecting in the background`);
+	}
 	const reconnects = runtime.link.reconnects;
 	if (reconnects > 0) {
 		const last = runtime.link.lastClose;

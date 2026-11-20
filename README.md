@@ -231,12 +231,15 @@ detection is the heartbeat's job: two unacknowledged heartbeats recycle the sock
 
 Retries start at `reconnectMs` (2s) and double to a 30s ceiling, so a broker that is unreachable —
 DNS failure, deploy in progress, laptop off the network — costs two attempts a minute instead of
-one every 2s. Sound follows the same rule: **one warning per incident**, not per attempt (the link and the
-heartbeat share one minute-long window, so a flap is one line however many detectors notice it). A link that
-keeps dropping gets one warning a minute and is counted at info; a heartbeat the broker did not
-acknowledge warns once and then stays quiet until it is delivered again; and when the link already
-knows it is down, the heartbeat says nothing at all. Quitting never waits on a socket that is not
-answering. The detail lives in bare `/mqtt` and `/mqtt status` (`drops:`), not in notifications.
+one every 2s.
+
+Connection trouble is **not** a notification: a laptop that naps produces it forever, and none of it
+is news the reader can act on. The footer carries the state instead — `mqtt orchestrator up 1h12m ·
+3 drops` or `mqtt down 2m · reconnecting` — and the detail lives in `/mqtt status` (`link: down 4m`,
+`drops: 3 (last 17:22:04: ws)`) and in the log ring that bare `/mqtt` prints. Only two things
+interrupt the transcript: an *error* you can act on (a refused credential, a wrong approval code, a
+session taken over), and one warning when the link has been down for five minutes, because at that
+point work cannot be dispatched. Everything else stays quiet until it recovers.
 
 `dispatch_task` options worth knowing: `notify: "silent" | "wake"`, `ifBusy: "fail" | "wait"`,
 `timeoutMs`, `maxCostUsd`, and `repo: { baseRef | baseSha, branch }`.

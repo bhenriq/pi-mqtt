@@ -195,6 +195,7 @@ worker is idle), `timeoutMs`, `maxCostUsd`, `repo: { baseSha | baseRef, branch }
 | Presence appears, but dispatched tasks fail with auth/model errors | The **worker** needs its own model credentials (`pi` → `/login`). The broker being reachable does not give it a model |
 | Task result says `busy with …` | A second task arrived while one ran; it was rejected rather than queued |
 | The roster empty on the orchestrator but the worker is running | Different room name or password, so they are in different namespaces |
+| No notifications, but is it connected? | The footer says so: `mqtt orchestrator up 1h12m` / `mqtt down 2m · reconnecting`. `/mqtt status` has `link:` and `drops:`; transport trouble never interrupts the transcript |
 | A worker shows `idle?`/`busy?` (stale) | Its heartbeat is late, which may mean throttled timers rather than a dead box. `/mqtt ping <worker>` (or just dispatching) asks it: a pong means alive and late, no pong means wedged |
 | A worker shows `pending` and nothing can be dispatched to it | It is waiting for approval. The orchestrator shows a code when the worker joins; compare it with the code on the worker's screen, then `/mqtt admit <worker> <code>` (`/mqtt pending` lists waiting codes). One approval covers the whole room — an orchestrator joining later adopts it |
 | `dispatch failed: worker "x" advertises no identity key` | That worker runs a pi-mqtt older than admission. Update the package there and `/mqtt connect`; it will join `pending` and show a code |
